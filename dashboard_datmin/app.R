@@ -247,12 +247,6 @@ train_models <- function() {
 model_results <- train_models()
 model_results
 
-# Load Data
-addResourcePath("images", "C:/Users/Rabithah Zahiratus S/Downloads/dashboard_datmin")
-addResourcePath("images1", "C:/Users/Rabithah Zahiratus S/Downloads/dashboard_datmin")
-addResourcePath("images2", "C:/Users/Rabithah Zahiratus S/Downloads/dashboard_datmin")
-addResourcePath("images3", "C:/Users/Rabithah Zahiratus S/Downloads/dashboard_datmin")
-
 # Header dashboard
 header <- dashboardHeader(title = "Dashboard of Dropout and Academic Success", titleWidth = 200)
 
@@ -276,13 +270,13 @@ ui <- dashboardPage(
                 carousel(width = 12,
                          id = "mycarousel",
                          carouselItem(
-                           tags$img(src = "images1/beranda.png", width = "100%", height = "1080px")
+                           tags$img(src = "beranda.png", width = "100%", height = "1080px")
                          ),
                          carouselItem(
-                           tags$img(src = "images2/infografis.jpg", width = "50%", height = "1419px")
+                           tags$img(src = "infografis.jpg", width = "50%", height = "1419px")
                          ),
                          carouselItem(
-                           tags$img(src = "images3/foto.png", width = "100%", height = "1080px")
+                           tags$img(src = "foto.png", width = "100%", height = "1080px")
                          )
                 )
                 
@@ -291,7 +285,7 @@ ui <- dashboardPage(
       tabItem(tabName = "home",
               div(h1(strong("ACADEMIC SUCCESS")),style="text-align: center;"),
               div(("Data Prediksi Drop Out Perguruan Tinggi"),style="text-align: center;"),br(),
-              tags$img(src = "images3/do.jpg", width = "100%", height = "720px"),
+              tags$img(src = "do.jpg", width = "100%", height = "720px"),
               p(" Image courtesy: Adobe Stock", style = "color: #808080; font-size: 12px"),
               br(),
               tabsetPanel(
