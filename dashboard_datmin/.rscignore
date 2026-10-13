@@ -1,0 +1,5 @@
+# train_models.R dijalankan manual secara terpisah, bukan oleh app.R --
+# dikecualikan biar rsconnect tidak ikut nge-bundle dependency training
+# (randomForest, rsample, rpart) yang tidak dipakai saat app berjalan.
+train_models.R
+*_log.txt
