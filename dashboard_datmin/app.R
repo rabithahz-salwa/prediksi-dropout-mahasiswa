@@ -87,7 +87,7 @@ buat_input_prediksi <- function(fitur) {
   switch(fitur,
     course = selectInput("pred_course", "Program studi", choices = course_choices),
     timeof_attendance = radioButtons("pred_timeof_attendance", "Waktu kuliah",
-                                      choices = c("Siang" = "0", "Malam" = "1"), inline = TRUE),
+                                      choices = c("Malam" = "0", "Siang" = "1"), inline = TRUE),
     prev_quali = selectInput("pred_prev_quali", "Pendidikan sebelumnya (kode)",
                               choices = setNames(levels(df$prev_quali), levels(df$prev_quali))),
     prev_quali_grade = numericInput("pred_prev_quali_grade", "Nilai pendidikan sebelumnya (0-200)",
@@ -131,8 +131,11 @@ css_tambahan <- tags$head(
     body { font-family: 'Archivo', -apple-system, sans-serif; background: var(--kapur); color: var(--tinta); }
     .narasi { font-family: 'Source Serif 4', Georgia, serif; }
     .navbar { background: var(--kapur) !important; border-bottom: 1px solid var(--abu-garis); }
-    .navbar-brand { font-weight: 800; letter-spacing: 0.02em; }
-    .brand-sub { font-size: 0.72rem; color: var(--abu-teks); font-weight: 400; display: block; margin-top: -2px; }
+    .navbar-brand { display: flex !important; align-items: center !important; padding-top: 14px; padding-bottom: 14px; margin-right: 28px !important; padding-right: 28px; border-right: 1px solid var(--abu-garis); }
+    .brand-block { display: flex; flex-direction: column; justify-content: center; }
+    .brand-main { font-size: 1.2rem; font-weight: 800; letter-spacing: 0.01em; line-height: 1.15; }
+    .brand-sub { font-size: 0.76rem; color: var(--abu-teks); font-weight: 600; line-height: 1.2; margin-top: 2px; }
+    .navbar .navbar-nav { align-items: center; }
     .nav-link { color: var(--tinta) !important; font-weight: 600; }
     .nav-link.active { border-bottom: 2px solid var(--tinta); }
     .eyebrow { font-size: 0.74rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--abu-teks); margin-bottom: 6px; }
@@ -157,10 +160,15 @@ css_tambahan <- tags$head(
     .risk-badge.tinggi { color: var(--risiko-tinggi); }
     .risk-badge.sedang { color: var(--risiko-sedang); }
     .risk-badge.rendah { color: var(--risiko-rendah); }
+    .model-option-group { display: flex; flex-direction: column; gap: 12px; margin-bottom: 4px; }
     .model-card { border: 1px solid var(--abu-garis); border-radius: 4px; padding: 14px 16px; cursor: pointer; }
-    .model-card.aktif { border: 2px solid var(--tinta); }
-    .model-card .judul { font-weight: 700; margin-bottom: 4px; }
-    .model-card .ket { font-size: 0.82rem; color: var(--abu-teks); }
+    .model-card.aktif { border: 2px solid var(--tinta); padding: 13px 15px; }
+    .model-card .head { display: flex; align-items: center; gap: 10px; }
+    .model-card .dot { width: 16px; height: 16px; min-width: 16px; border-radius: 50%; border: 1.5px solid var(--abu-teks); position: relative; }
+    .model-card.aktif .dot { border-color: var(--tinta); }
+    .model-card.aktif .dot::after { content: ''; position: absolute; inset: 3px; border-radius: 50%; background: var(--tinta); }
+    .model-card .judul { font-weight: 700; }
+    .model-card .ket { font-size: 0.82rem; color: var(--abu-teks); margin-top: 6px; margin-left: 26px; }
     .form-group-label { font-size: 0.74rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--tinta); border-top: 1px solid var(--abu-garis); padding-top: 8px; margin: 18px 0 10px; }
     .form-group-label:first-of-type { border-top: none; margin-top: 0; }
     .result-card { border: 1px solid var(--abu-garis); border-radius: 4px; padding: 20px; }
@@ -189,7 +197,10 @@ css_tambahan <- tags$head(
 # ---- UI ----
 ui <- page_navbar(
   id = "main_nav",
-  title = tags$div(tags$span("RETENSI"), tags$span("Prediksi risiko drop-out mahasiswa", class = "brand-sub")),
+  title = tags$div(class = "brand-block",
+    tags$div("RETENSI", class = "brand-main"),
+    tags$div("Prediksi risiko drop-out mahasiswa", class = "brand-sub")
+  ),
   theme = bs_theme(bg = "#FAFAF9", fg = "#17181B", base_font = font_google("Archivo")),
   header = css_tambahan,
   fillable = FALSE,
@@ -246,10 +257,7 @@ ui <- page_navbar(
       fluidRow(
         column(6,
           div(class = "form-group-label", "Jenis model"),
-          radioButtons("pred_pool", NULL, choiceNames = list(
-            tagList(div(class="judul", "Deteksi Dini"), div(class="ket", "Dipakai saat pendaftaran, ketika belum ada data akademik di perguruan tinggi.")),
-            tagList(div(class="judul", "Deteksi Lanjutan"), div(class="ket", "Dipakai setelah mahasiswa melewati semester 1-2, dengan data unit kurikuler terdaftar dan lulus."))
-          ), choiceValues = list("Dini", "Lanjutan"), selected = "Lanjutan"),
+          uiOutput("pilihan_pool"),
           uiOutput("pred_form"),
           br(),
           actionButton("predict", "Hitung risiko", class = "btn", style = "background:var(--tinta); color:#fff; border-radius:4px; font-weight:700;"),
@@ -388,8 +396,30 @@ server <- function(input, output, session) {
   observeEvent(input$ke_performa, nav_select("main_nav", selected = "performa", session = session))
 
   # ===== Prediksi Risiko =====
+  pool_dipilih <- reactiveVal("Lanjutan")
+  observeEvent(input$pool_pick, pool_dipilih(input$pool_pick))
+
+  output$pilihan_pool <- renderUI({
+    pilihan <- list(
+      list(nilai = "Dini", judul = "Deteksi Dini",
+           ket = "Dipakai saat pendaftaran, ketika belum ada data akademik di perguruan tinggi."),
+      list(nilai = "Lanjutan", judul = "Deteksi Lanjutan",
+           ket = "Dipakai setelah mahasiswa melewati semester 1-2, dengan data unit kurikuler terdaftar dan lulus.")
+    )
+    div(class = "model-option-group",
+      lapply(pilihan, function(p) {
+        aktif <- identical(pool_dipilih(), p$nilai)
+        div(class = paste("model-card", if (aktif) "aktif"),
+            onclick = sprintf("Shiny.setInputValue('pool_pick', '%s', {priority: 'event'})", p$nilai),
+            div(class = "head", div(class = "dot"), div(class = "judul", p$judul)),
+            div(class = "ket", p$ket)
+        )
+      })
+    )
+  })
+
   output$pred_form <- renderUI({
-    fitur <- model_pools[[input$pred_pool]]$fitur
+    fitur <- model_pools[[pool_dipilih()]]$fitur
     ada <- function(grp) intersect(grp, fitur)
     tagList(
       if (length(ada(fitur_akademik)) > 0) tagList(div(class = "form-group-label", "Data Akademik"), lapply(ada(fitur_akademik), buat_input_prediksi)),
@@ -401,7 +431,7 @@ server <- function(input, output, session) {
   hasil_prediksi <- reactiveVal(NULL)
 
   observeEvent(input$predict, {
-    pool  <- input$pred_pool
+    pool  <- pool_dipilih()
     fitur <- model_pools[[pool]]$fitur
 
     nilai <- lapply(fitur, function(f) {
@@ -455,8 +485,8 @@ server <- function(input, output, session) {
   df_terfilter <- reactive({
     d <- df %>% mutate(nama_prodi = unname(course_labels[as.character(course)]))
     if (input$filter_prodi != "Semua program studi") d <- d %>% filter(nama_prodi == input$filter_prodi)
-    if (input$filter_waktu == "Siang") d <- d %>% filter(timeof_attendance == "0")
-    if (input$filter_waktu == "Malam") d <- d %>% filter(timeof_attendance == "1")
+    if (input$filter_waktu == "Malam") d <- d %>% filter(timeof_attendance == "0")
+    if (input$filter_waktu == "Siang") d <- d %>% filter(timeof_attendance == "1")
     d
   })
 
@@ -487,7 +517,7 @@ server <- function(input, output, session) {
     tagList(
       fluidRow(
         column(4, buat_breakdown(d, "scholarship", c("0" = "Bukan penerima", "1" = "Penerima"), "Status beasiswa")),
-        column(4, buat_breakdown(d, "timeof_attendance", c("0" = "Siang", "1" = "Malam"), "Waktu kuliah")),
+        column(4, buat_breakdown(d, "timeof_attendance", c("0" = "Malam", "1" = "Siang"), "Waktu kuliah")),
         column(4, buat_breakdown(d, "gender", c("0" = "Laki-laki", "1" = "Perempuan"), "Jenis kelamin"))
       ),
       fluidRow(
