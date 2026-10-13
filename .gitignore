@@ -1,0 +1,11 @@
+# R session/history files (auto-generated, not needed in repo)
+.Rhistory
+.RData
+.Rproj.user/
+
+# rsconnect deployment metadata (machine/account-specific, regenerated on deploy)
+rsconnect/
+dashboard_datmin/rsconnect/
+
+# Large media files - not deploy artifacts, bulky for a git repo
+*.mp4
