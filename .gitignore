@@ -9,3 +9,6 @@ dashboard_datmin/rsconnect/
 
 # Large media files - not deploy artifacts, bulky for a git repo
 *.mp4
+
+# Log output from manual test runs (regenerable, not source)
+dashboard_datmin/*_log.txt
