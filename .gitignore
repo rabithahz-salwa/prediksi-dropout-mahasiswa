@@ -12,3 +12,6 @@ dashboard_datmin/rsconnect/
 
 # Log output from manual test runs (regenerable, not source)
 dashboard_datmin/*_log.txt
+
+# Mockup/design reference exports (not part of the app)
+/*.html

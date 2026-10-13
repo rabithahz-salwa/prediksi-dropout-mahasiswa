@@ -1,308 +1,348 @@
 #
-# This is a Shiny web application. You can run the application by clicking
-# the 'Run App' button above.
+# RETENSI - Dashboard Prediksi Risiko Drop Out Mahasiswa
+# Redesign v2: bslib (Bootstrap 5), lihat README untuk detail desain.
 #
-# Model dilatih di train_models.R (dijalankan manual, hasilnya di
-# model_results_dini.rds / model_results_lanjutan.rds) -- app ini cuma load,
-# tidak training ulang setiap dibuka.
+# Model dilatih di train_models.R (dijalankan manual), hasilnya di
+# model_results_dini.rds / model_results_lanjutan.rds -- app ini cuma load.
 #
 
 library(shiny)
-library(shinydashboard)
-library(shinydashboardPlus)
-library(dashboardthemes)
-library(caret)
-library(e1071)
-library(pROC)
+library(bslib)
 library(recipes)
-library(dplyr)
 library(xgboost)
-library(DT)
-library(ggplot2)
-library(reshape2)
+library(dplyr)
 
-# ---- Load data (untuk tab Database & Visualization) ----
+# ---- Data & model ----
 df <- read.csv("data.csv", sep = ";", header = TRUE)
 
-categorical_vars <- c("course", "timeof_attendance", "prev_quali", "gender", "scholarship", "target")
-numeric_vars <- setdiff(colnames(df), categorical_vars)
-
-df <- df %>%
-  mutate(across(all_of(setdiff(categorical_vars, "target")), as.factor))
-
-# Label dibuat terbaca & konsisten dengan train_models.R ("Dropout" = positive class)
+categorical_vars <- c("course", "timeof_attendance", "prev_quali", "gender", "scholarship")
+df <- df %>% mutate(across(all_of(categorical_vars), as.factor))
 df$target <- factor(ifelse(df$target == 0, "Dropout", "Lulus"), levels = c("Lulus", "Dropout"))
 
-selected_columns <- df[, c("prev_quali_grade", "admiss_grade", "age_enroll", "first_enroll",
-                           "first_approve", "second_enroll", "second_approve")]
-
-# ---- Load model hasil training (lihat train_models.R) ----
 model_dini     <- readRDS("model_results_dini.rds")
 model_lanjutan <- readRDS("model_results_lanjutan.rds")
 model_pools    <- list(Dini = model_dini, Lanjutan = model_lanjutan)
 
-# ---- Pilihan & builder untuk form Prediksi (dinamis ikut fitur tiap pool) ----
-course_choices <- c(
-  "33: Teknologi Produksi Biofuel" = "33", "171: Animasi dan Desain Multimedia" = "171",
-  "8014: Layanan Sosial (kehadiran malam)" = "8014", "9003: Agronomi" = "9003",
-  "9070: Desain Komunikasi" = "9070", "9085: Keperawatan Hewan" = "9085",
-  "9119: Teknik Informatika" = "9119", "9130: Persamaan Budaya" = "9130",
-  "9147: Manajemen" = "9147", "9238: Layanan Sosial" = "9238",
-  "9254: Pariwisata" = "9254", "9500: Keperawatan" = "9500",
-  "9556: Kebersihan Mulut" = "9556", "9670: Manajemen Periklanan dan Pemasaran" = "9670",
-  "9773: Jurnalisme dan Komunikasi" = "9773", "9853: Pendidikan Dasar" = "9853",
-  "9991: Manajemen (kehadiran malam)" = "9991"
+course_labels <- c(
+  "33" = "Teknologi Produksi Biofuel", "171" = "Animasi dan Desain Multimedia",
+  "8014" = "Layanan Sosial (malam)", "9003" = "Agronomi",
+  "9070" = "Desain Komunikasi", "9085" = "Keperawatan Hewan",
+  "9119" = "Teknik Informatika", "9130" = "Persamaan Budaya",
+  "9147" = "Manajemen", "9238" = "Layanan Sosial",
+  "9254" = "Pariwisata", "9500" = "Keperawatan",
+  "9556" = "Kebersihan Mulut", "9670" = "Manajemen Periklanan & Pemasaran",
+  "9773" = "Jurnalisme dan Komunikasi", "9853" = "Pendidikan Dasar",
+  "9991" = "Manajemen (malam)"
 )
+course_choices <- setNames(names(course_labels), paste0(names(course_labels), ": ", course_labels))
+
+total_mahasiswa   <- nrow(df)
+historis_dropout  <- mean(df$target == "Dropout")
+# XGBoost: model yang dipakai di tab Prediksi Risiko (lihat tabel_performa
+# di server soal kenapa ini, bukan model dengan akurasi tertinggi semata).
+akurasi_model_dipakai <- model_lanjutan$models$xgboost$test$accuracy
+
+# Breakdown per prodi -- program studi dengan n < 20 dikecualikan (sampel
+# terlalu kecil buat jadi sorotan, lihat n=4 "Teknologi Produksi Biofuel").
+per_prodi <- df %>%
+  mutate(nama_prodi = unname(course_labels[as.character(course)])) %>%
+  group_by(nama_prodi) %>%
+  summarise(n = n(), dropout_rate = mean(target == "Dropout"), .groups = "drop") %>%
+  filter(n >= 20) %>%
+  arrange(desc(dropout_rate))
+per_prodi_overview <- head(per_prodi, 8)
+
+nama_model <- c(glm = "Regresi Logistik", svm_linear = "SVM Linear", svm_poly = "SVM Polynomial",
+                 svm_radial = "SVM Radial", xgboost = "XGBoost")
+
+# ---- Helper UI kecil ----
+bar_html <- function(pct, rata_rata = NULL, warna = "var(--abu-teks)") {
+  tick <- if (!is.null(rata_rata)) {
+    sprintf('<div class="bar-tick" style="left:%.1f%%"></div>', rata_rata * 100)
+  } else ""
+  sprintf(
+    '<div class="bar-track">%s<div class="bar-fill" style="width:%.1f%%;background:%s"></div></div>',
+    tick, pct * 100, warna
+  )
+}
+
+risk_kategori <- function(prob) {
+  if (prob >= 0.6) list(label = "Tinggi", kelas = "tinggi", glyph = "▲")
+  else if (prob >= 0.3) list(label = "Sedang", kelas = "sedang", glyph = "■")
+  else list(label = "Rendah", kelas = "rendah", glyph = "●")
+}
+
+risk_badge <- function(prob) {
+  k <- risk_kategori(prob)
+  tags$span(class = paste("risk-badge", k$kelas), HTML(paste0(k$glyph, " ", toupper(k$label))))
+}
+
+saran_tindak_lanjut <- function(prob) {
+  if (prob >= 0.6) "Disarankan pendampingan akademik tambahan dalam waktu dekat."
+  else if (prob >= 0.3) "Disarankan pemantauan berkala dan komunikasi dengan dosen wali."
+  else "Risiko rendah berdasarkan data saat ini; tidak ada tindakan khusus yang disarankan."
+}
 
 buat_input_prediksi <- function(fitur) {
   switch(fitur,
-    course = selectInput("pred_course", "Program Studi:", choices = course_choices),
-    timeof_attendance = selectInput("pred_timeof_attendance", "Waktu Kuliah:",
-                                     choices = c("Siang" = "0", "Malam" = "1")),
-    prev_quali = selectInput("pred_prev_quali", "Kode Pendidikan Sebelumnya:",
+    course = selectInput("pred_course", "Program studi", choices = course_choices),
+    timeof_attendance = radioButtons("pred_timeof_attendance", "Waktu kuliah",
+                                      choices = c("Siang" = "0", "Malam" = "1"), inline = TRUE),
+    prev_quali = selectInput("pred_prev_quali", "Pendidikan sebelumnya (kode)",
                               choices = setNames(levels(df$prev_quali), levels(df$prev_quali))),
-    prev_quali_grade = numericInput("pred_prev_quali_grade", "Nilai Pendidikan Sebelumnya (0-200):",
+    prev_quali_grade = numericInput("pred_prev_quali_grade", "Nilai pendidikan sebelumnya (0-200)",
                                      value = 130, min = 0, max = 200),
-    admiss_grade = numericInput("pred_admiss_grade", "Nilai Penerimaan (0-200):",
+    admiss_grade = numericInput("pred_admiss_grade", "Nilai penerimaan (0-200)",
                                  value = 130, min = 0, max = 200),
-    gender = selectInput("pred_gender", "Jenis Kelamin:",
-                          choices = c("Laki-laki" = "0", "Perempuan" = "1")),
-    scholarship = selectInput("pred_scholarship", "Penerima Beasiswa:",
-                               choices = c("Tidak" = "0", "Ya" = "1")),
-    age_enroll = numericInput("pred_age_enroll", "Usia saat Mendaftar:", value = 20, min = 16, max = 70),
-    first_enroll = numericInput("pred_first_enroll", "Unit Kurikuler Terdaftar - Semester 1:",
+    gender = radioButtons("pred_gender", "Jenis kelamin",
+                           choices = c("Perempuan" = "1", "Laki-laki" = "0"), inline = TRUE),
+    scholarship = radioButtons("pred_scholarship", "Penerima beasiswa",
+                                choices = c("Ya" = "1", "Tidak" = "0"), inline = TRUE),
+    age_enroll = numericInput("pred_age_enroll", "Usia saat mendaftar", value = 19, min = 16, max = 70),
+    first_enroll = numericInput("pred_first_enroll", "Semester 1 — unit kurikuler terdaftar",
                                  value = 6, min = 0, max = 30),
-    first_approve = numericInput("pred_first_approve", "Unit Kurikuler Lulus - Semester 1:",
+    first_approve = numericInput("pred_first_approve", "Semester 1 — unit kurikuler lulus",
                                   value = 6, min = 0, max = 30),
-    second_enroll = numericInput("pred_second_enroll", "Unit Kurikuler Terdaftar - Semester 2:",
+    second_enroll = numericInput("pred_second_enroll", "Semester 2 — unit kurikuler terdaftar",
                                   value = 6, min = 0, max = 30),
-    second_approve = numericInput("pred_second_approve", "Unit Kurikuler Lulus - Semester 2:",
+    second_approve = numericInput("pred_second_approve", "Semester 2 — unit kurikuler lulus",
                                    value = 6, min = 0, max = 30)
   )
 }
 
-ui <- dashboardPage(
-  dashboardHeader(title = "Dropout Prediction App"),
-  dashboardSidebar(
-    sidebarMenu(
-      menuItem("Beranda", tabName = "beranda", icon = icon("info-circle")),
-      menuItem("Home", tabName = "home", icon = icon("home")),
-      menuItem("Prediksi", tabName = "prediksi", icon = icon("magnifying-glass-chart")),
-      menuItem("Database", tabName = "table", icon = icon("database")),
-      menuItem("Visualization", tabName = "visualization", icon = icon("chart-bar")),
-      menuItem("Analyze", tabName = "analyze_tab", icon = icon("chart-line")),
-      menuItem("Performance", tabName = "performance", icon = icon("chart-bar"))
+fitur_akademik   <- c("course", "admiss_grade")
+fitur_pendaftaran <- c("age_enroll", "timeof_attendance", "prev_quali", "prev_quali_grade",
+                        "gender", "scholarship")
+fitur_performa   <- c("first_enroll", "first_approve", "second_enroll", "second_approve")
+
+# ---- CSS ----
+css_tambahan <- tags$head(
+  tags$link(rel = "stylesheet", href = paste0(
+    "https://fonts.googleapis.com/css2?",
+    "family=Archivo:ital,wght@0,400;0,600;0,700;0,800&",
+    "family=Source+Serif+4:ital@0;1&display=swap"
+  )),
+  tags$style(HTML("
+    :root {
+      --kapur: #FAFAF9; --abu-garis: #E4E5E7; --abu-teks: #6B6E75;
+      --tinta: #17181B; --biru-tautan: #2B5FAD;
+      --risiko-tinggi: #C0392B; --risiko-sedang: #B7791F; --risiko-rendah: #2E7D46;
+    }
+    body { font-family: 'Archivo', -apple-system, sans-serif; background: var(--kapur); color: var(--tinta); }
+    .narasi { font-family: 'Source Serif 4', Georgia, serif; }
+    .navbar { background: var(--kapur) !important; border-bottom: 1px solid var(--abu-garis); }
+    .navbar-brand { font-weight: 800; letter-spacing: 0.02em; }
+    .brand-sub { font-size: 0.72rem; color: var(--abu-teks); font-weight: 400; display: block; margin-top: -2px; }
+    .nav-link { color: var(--tinta) !important; font-weight: 600; }
+    .nav-link.active { border-bottom: 2px solid var(--tinta); }
+    .eyebrow { font-size: 0.74rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--abu-teks); margin-bottom: 6px; }
+    h1.headline { font-size: 2rem; font-weight: 800; letter-spacing: -0.01em; max-width: 24ch; }
+    .stat-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 24px; margin: 28px 0; }
+    .stat-block { border-top: 2px solid var(--tinta); padding-top: 10px; }
+    .stat-label { font-size: 0.78rem; color: var(--abu-teks); font-weight: 600; margin-bottom: 4px; }
+    .stat-value { font-size: 2.3rem; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+    .stat-caption { font-size: 0.8rem; color: var(--abu-teks); }
+    .stat-value.accent-risk { color: var(--risiko-tinggi); }
+    .section-title { font-size: 1.3rem; font-weight: 800; margin-bottom: 4px; }
+    .section-sub { color: var(--abu-teks); font-size: 0.85rem; margin-bottom: 14px; }
+    table.listing { width: 100%; border-collapse: collapse; }
+    table.listing th { text-align: left; font-size: 0.72rem; color: var(--abu-teks); font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; border-bottom: 1px solid var(--abu-garis); padding: 6px 10px 6px 0; }
+    table.listing td { padding: 10px 10px 10px 0; border-bottom: 1px solid var(--abu-garis); vertical-align: middle; }
+    .prodi-row { cursor: pointer; }
+    .prodi-row:hover td { background: #F1F1EF; }
+    .bar-track { position: relative; background: var(--abu-garis); height: 8px; border-radius: 2px; width: 100%; min-width: 120px; }
+    .bar-fill { position: absolute; left: 0; top: 0; height: 100%; border-radius: 2px; }
+    .bar-tick { position: absolute; top: -3px; width: 1px; height: 14px; background: var(--tinta); z-index: 2; }
+    .risk-badge { font-size: 0.74rem; font-weight: 700; letter-spacing: 0.02em; }
+    .risk-badge.tinggi { color: var(--risiko-tinggi); }
+    .risk-badge.sedang { color: var(--risiko-sedang); }
+    .risk-badge.rendah { color: var(--risiko-rendah); }
+    .model-card { border: 1px solid var(--abu-garis); border-radius: 4px; padding: 14px 16px; cursor: pointer; }
+    .model-card.aktif { border: 2px solid var(--tinta); }
+    .model-card .judul { font-weight: 700; margin-bottom: 4px; }
+    .model-card .ket { font-size: 0.82rem; color: var(--abu-teks); }
+    .form-group-label { font-size: 0.74rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--tinta); border-top: 1px solid var(--abu-garis); padding-top: 8px; margin: 18px 0 10px; }
+    .form-group-label:first-of-type { border-top: none; margin-top: 0; }
+    .result-card { border: 1px solid var(--abu-garis); border-radius: 4px; padding: 20px; }
+    .result-eyebrow { font-size: 0.74rem; color: var(--abu-teks); font-weight: 700; text-transform: uppercase; }
+    .result-number { font-size: 3.2rem; font-weight: 800; color: var(--risiko-tinggi); line-height: 1.1; font-variant-numeric: tabular-nums; }
+    .result-number.sedang { color: var(--risiko-sedang); }
+    .result-number.rendah { color: var(--risiko-rendah); }
+    .risk-scale { display: flex; height: 8px; border-radius: 2px; overflow: hidden; margin: 10px 0 4px; position: relative; }
+    .risk-scale .seg { height: 100%; }
+    .risk-scale .tick { position: absolute; top: -3px; width: 2px; height: 14px; background: var(--tinta); }
+    .scale-labels { display: flex; justify-content: space-between; font-size: 0.72rem; color: var(--abu-teks); margin-bottom: 14px; }
+    .disclaimer { font-size: 0.78rem; color: var(--abu-teks); margin-top: 14px; }
+    .concept-wrap { border: 2px dashed var(--abu-garis); border-radius: 6px; padding: 28px 30px; }
+    .concept-badge { display: inline-block; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; border: 1px dashed var(--abu-teks); color: var(--abu-teks); padding: 4px 10px; border-radius: 3px; margin-bottom: 14px; }
+    .perf-table th, .perf-table td { padding: 8px 14px 8px 0; }
+    .perf-table .baris-terbaik { font-weight: 700; }
+    .confusion-grid { display: grid; grid-template-columns: 140px 1fr 1fr; gap: 1px; background: var(--abu-garis); border: 1px solid var(--abu-garis); }
+    .confusion-grid > div { background: var(--kapur); padding: 12px; }
+    .confusion-grid .head { font-size: 0.72rem; color: var(--abu-teks); font-weight: 700; text-transform: uppercase; }
+    .confusion-grid .sel-benar { background: var(--tinta); color: #fff; }
+    .confusion-grid .angka { font-size: 1.6rem; font-weight: 800; }
+    .confusion-grid .ket { font-size: 0.74rem; opacity: 0.8; }
+  "))
+)
+
+# ---- UI ----
+ui <- page_navbar(
+  id = "main_nav",
+  title = tags$div(tags$span("RETENSI"), tags$span("Prediksi risiko drop-out mahasiswa", class = "brand-sub")),
+  theme = bs_theme(bg = "#FAFAF9", fg = "#17181B", base_font = font_google("Archivo")),
+  header = css_tambahan,
+  fillable = FALSE,
+
+  nav_panel("Overview", value = "overview",
+    div(class = "container-fluid", style = "max-width:1200px; padding:28px 20px;",
+      div(class = "eyebrow", "Ringkasan data historis"),
+      h1(class = "headline", textOutput("headline_overview", inline = TRUE)),
+      p(class = "section-sub", style = "max-width:70ch; margin-top:10px;",
+        "Dashboard ini memperkirakan risiko drop-out dari data pendaftaran dan performa akademik awal, sehingga pendampingan dapat dipertimbangkan sebelum masalah akademik berlanjut."),
+      div(class = "stat-strip",
+        div(class = "stat-block",
+            div(class = "stat-label", "Total Mahasiswa"),
+            div(class = "stat-value", format(total_mahasiswa, big.mark = ".", decimal.mark = ",")),
+            div(class = "stat-caption", "rekam data pelatihan model")),
+        div(class = "stat-block",
+            div(class = "stat-label", "Historis Drop-out"),
+            div(class = "stat-value accent-risk", paste0(round(historis_dropout * 100, 1), "%")),
+            div(class = "stat-caption", "dari seluruh mahasiswa dalam data")),
+        div(class = "stat-block",
+            div(class = "stat-label", "Akurasi Model Terpilih"),
+            div(class = "stat-value", paste0(round(akurasi_model_dipakai * 100, 1), "%")),
+            div(class = "stat-caption", "XGBoost · data performa semester 1-2"))
+      ),
+      fluidRow(
+        column(8,
+          div(class = "section-title", "Proporsi drop-out per program studi"),
+          div(class = "section-sub", "Diurutkan dari proporsi tertinggi. Klik baris untuk membuka Eksplorasi Data dengan filter prodi tersebut."),
+          uiOutput("tabel_prodi"),
+          p(class = "disclaimer", "Program studi dengan sampel di bawah 20 mahasiswa dikecualikan.")
+        ),
+        column(4,
+          div(class = "section-title", "Bagian lain"),
+          tags$ul(style = "list-style:none; padding:0;",
+            tags$li(style="margin-bottom:16px;", actionLink("ke_prediksi", strong("Prediksi Risiko ›")), br(),
+                    span(class="section-sub", "Perkirakan risiko satu mahasiswa, baik saat pendaftaran maupun setelah semester 1-2.")),
+            tags$li(style="margin-bottom:16px;", actionLink("ke_eksplorasi", strong("Eksplorasi Data ›")), br(),
+                    span(class="section-sub", "Bandingkan proporsi drop-out menurut karakteristik mahasiswa.")),
+            tags$li(actionLink("ke_performa", strong("Performa Model ›")), br(),
+                    span(class="section-sub", "Seberapa tepat model, dan di mana ia masih keliru."))
+          ),
+          p(class = "disclaimer", style="margin-top:20px;",
+            "Sumber: 13 variabel data akademik anonim (program studi, waktu kuliah, pendidikan sebelumnya, nilai penerimaan, usia, jenis kelamin, beasiswa, unit kurikuler semester 1-2).")
+        )
+      )
     )
   ),
-  dashboardBody(
-    shinyDashboardThemes("blue_gradient"),
-    tabItems(
-      tabItem(tabName = "beranda",
-              titlePanel(
-                carousel(width = 12,
-                         id = "mycarousel",
-                         carouselItem(
-                           tags$img(src = "beranda.png", width = "100%", height = "1080px")
-                         ),
-                         carouselItem(
-                           tags$img(src = "infografis.jpg", width = "50%", height = "1419px")
-                         ),
-                         carouselItem(
-                           tags$img(src = "foto.png", width = "100%", height = "1080px")
-                         )
-                )
 
-              )
+  nav_panel("Prediksi Risiko", value = "prediksi",
+    div(class = "container-fluid", style = "max-width:1200px; padding:28px 20px;",
+      div(class = "eyebrow", "Prediksi per mahasiswa"),
+      h1(class = "headline", "Perkiraan risiko drop-out"),
+      p(class = "section-sub", "Isi data satu mahasiswa untuk melihat perkiraan risikonya. Hasil ini alat bantu pertimbangan, bukan keputusan."),
+      fluidRow(
+        column(6,
+          div(class = "form-group-label", "Jenis model"),
+          radioButtons("pred_pool", NULL, choiceNames = list(
+            tagList(div(class="judul", "Deteksi Dini"), div(class="ket", "Dipakai saat pendaftaran, ketika belum ada data akademik di perguruan tinggi.")),
+            tagList(div(class="judul", "Deteksi Lanjutan"), div(class="ket", "Dipakai setelah mahasiswa melewati semester 1-2, dengan data unit kurikuler terdaftar dan lulus."))
+          ), choiceValues = list("Dini", "Lanjutan"), selected = "Lanjutan"),
+          uiOutput("pred_form"),
+          br(),
+          actionButton("predict", "Hitung risiko", class = "btn", style = "background:var(--tinta); color:#fff; border-radius:4px; font-weight:700;"),
+          actionLink("reset_pred", "Atur ulang", style = "margin-left:14px;")
+        ),
+        column(6, uiOutput("prediction_result"))
+      )
+    )
+  ),
+
+  nav_panel("Eksplorasi Data", value = "eksplorasi",
+    div(class = "container-fluid", style = "max-width:1200px; padding:28px 20px;",
+      div(class = "eyebrow", "Eksplorasi data"),
+      h1(class = "headline", "Proporsi drop-out menurut karakteristik mahasiswa"),
+      fluidRow(
+        column(4, selectInput("filter_prodi", "Filter program studi",
+                               choices = c("Semua program studi", per_prodi$nama_prodi))),
+        column(4, selectInput("filter_waktu", "Waktu kuliah", choices = c("Semua", "Siang", "Malam"))),
+        column(4, div(style = "text-align:right; padding-top:28px;",
+                       span(style = "font-size:1.6rem; font-weight:800;", textOutput("n_terfilter", inline = TRUE)),
+                       span(class = "disclaimer", " mahasiswa"))
+        )
       ),
-      tabItem(tabName = "home",
-              div(h1(strong("ACADEMIC SUCCESS")),style="text-align: center;"),
-              div(("Data Prediksi Drop Out Perguruan Tinggi"),style="text-align: center;"),br(),
-              tags$img(src = "do.jpg", width = "100%", height = "720px"),
-              p(" Image courtesy: Adobe Stock", style = "color: #808080; font-size: 12px"),
-              br(),
-              tabsetPanel(
-                tabPanel(strong("Data"),
-                         box(title = strong("Deskripsi Data"), width = 12, solidHeader = TRUE,
-                             p("Dataset yang dibuat dari institusi pendidikan tinggi yang terkait dengan mahasiswa yang terdaftar di berbagai program studi sarjana. Dataset ini mencakup informasi yang diketahui pada saat pendaftaran mahasiswa dan kinerja akademik mahasiswa pada akhir semester pertama dan kedua. Data tersebut digunakan untuk membangun model klasifikasi untuk memprediksi tingkat putus sekolah dan keberhasilan akademik siswa.")
-                         )
-                ),
-                tabPanel(strong("Data Variables"),
-                         box(title = strong("Attribute Information"), width = 12, solidHeader = TRUE,
-                             p("Dataset ini memiliki 13 kolom (variabel) dengan penjelasan sebagai berikut:"),
-                             tags$ol(
-                               tags$li(
-                                 strong("course: "), "Program studi yang diambil:",
-                                 tags$ul(
-                                   tags$li("33: Teknologi Produksi Biofuel"),
-                                   tags$li("171: Animasi dan Desain Multimedia"),
-                                   tags$li("8014: Layanan Sosial (kehadiran malam)"),
-                                   tags$li("9003: Agronomi"),
-                                   tags$li("9070: Desain Komunikasi"),
-                                   tags$li("9085: Keperawatan Hewan"),
-                                   tags$li("9119: Teknik Informatika"),
-                                   tags$li("9130: Persamaan budaya"),
-                                   tags$li("9147: Manajemen"),
-                                   tags$li("9238: Layanan Sosial"),
-                                   tags$li("9254: Pariwisata"),
-                                   tags$li("9500: Keperawatan"),
-                                   tags$li("9556: Kebersihan Mulut"),
-                                   tags$li("9670: Manajemen Periklanan dan Pemasaran"),
-                                   tags$li("9773: Jurnalisme dan Komunikasi"),
-                                   tags$li("9853: Pendidikan Dasar"),
-                                   tags$li("9991: Manajemen (kehadiran malam)")
-                                 )
-                               ),
-                               tags$li(
-                                 strong("timeof_attendance: "), "Jenis kedatangan (0 = Siang, 1 = Malam)."
-                               ),
-                               tags$li(
-                                 strong("prev_quali: "), "Pendidikan sebelumnya."
-                               ),
-                               tags$li(
-                                 strong("prev_quali_grade: "), "Nilai dari pendidikan sebelumnya (antara 0 dan 200)."
-                               ),
-                               tags$li(
-                                 strong("admiss_grade: "), "Nilai penerimaan (antara 0 dan 200)."
-                               ),
-                               tags$li(
-                                 strong("gender: "), "Jenis Kelamin (0 = Laki-Laki, 1 = Perempuan)."
-                               ),
-                               tags$li(
-                                 strong("scholarship: "), "Apakah seorang pemegang beasiswa? (0 = Tidak, 1 = Ya)."
-                               ),
-                               tags$li(
-                                 strong("age_enroll: "), "Usia mahasiswa saat pendaftaran."
-                               ),
-                               tags$li(
-                                 strong("first_enroll: "), "Jumlah unit kurikuler yang terdaftar pada semester pertama."
-                               ),
-                               tags$li(
-                                 strong("first_approve: "), "Jumlah unit kurikuler yang lulus pada semester pertama."
-                               ),
-                               tags$li(
-                                 strong("second_enroll: "), "Jumlah unit kurikuler yang terdaftar pada semester kedua."
-                               ),
-                               tags$li(
-                                 strong("second_approve: "), "Jumlah unit kurikuler yang lulus pada semester kedua."
-                               ),
-                               tags$li(
-                                 strong("target: "), "Variabel target yang menunjukkan apakah mahasiswa akan dropout."
-                               )
-                             )
-                         )
-                )
-              )
+      br(),
+      uiOutput("breakdown_eksplorasi"),
+      p(class = "disclaimer", "Garis vertikal menunjukkan rata-rata drop-out pada filter aktif.")
+    )
+  ),
+
+  nav_panel("Performa Model", value = "performa",
+    div(class = "container-fluid", style = "max-width:1200px; padding:28px 20px;",
+      fluidRow(
+        column(8,
+          div(class = "eyebrow", "Performa model"),
+          h1(class = "headline", "Perbandingan model pada data uji")
+        ),
+        column(4, div(style = "text-align:right; padding-top:20px;",
+          radioButtons("pool_performa", NULL, choices = c("Deteksi Dini" = "Dini", "Deteksi Lanjutan" = "Lanjutan"),
+                       selected = "Lanjutan", inline = TRUE)
+        ))
       ),
-      tabItem(tabName = "prediksi",
-              h2(strong("Prediksi Risiko Drop Out")),
-              p("Pilih jenis model sesuai informasi yang kamu punya tentang mahasiswa, isi data di bawah, lalu klik Prediksi."),
-              fluidRow(
-                column(width = 4,
-                       box(width = 12, solidHeader = TRUE, title = "Input Data Mahasiswa",
-                           selectInput("pred_pool", "Jenis Model:",
-                                       choices = c("Deteksi Dini (saat pendaftaran)" = "Dini",
-                                                   "Deteksi Lanjutan (setelah semester 1-2)" = "Lanjutan")),
-                           uiOutput("pred_form"),
-                           actionButton("predict", "Prediksi", icon = icon("magnifying-glass"), class = "btn-primary")
-                       )
-                ),
-                column(width = 8,
-                       box(width = 12, solidHeader = TRUE, title = "Hasil Prediksi",
-                           uiOutput("prediction_result")
-                       )
-                )
-              )
-      ),
-      tabItem(tabName = "table",
-              h2(strong("Database")),
-              tabsetPanel(
-                tabPanel(strong("Data Table"),
-                         DTOutput("data_table")),
-                tabPanel(strong("Summary Statistics"),
-                         verbatimTextOutput("summary_stats"))
-              )
-      ),
-      tabItem(tabName = "visualization",
-              fluidRow(
-                column(width = 12, h2("Visualization"))
-              ),
-              fluidRow(
-                column(width = 3,
-                       selectInput("plot_type", "Pilih Jenis Plot:",
-                                   choices = c("Scatter Plot", "Bar Chart", "Heatmap", "Box Plot", "Histogram", "Violin Plot")),
-                       conditionalPanel(
-                         condition = "input.plot_type == 'Scatter Plot'",
-                         selectInput("x_var", "Pilih Variabel X:", choices = colnames(df)),
-                         selectInput("y_var", "Pilih Variabel Y:", choices = colnames(df))
-                       ),
-                       conditionalPanel(
-                         condition = "input.plot_type == 'Box Plot' || input.plot_type == 'Violin Plot'",
-                         selectInput("x_var", "Pilih Variabel X:", choices = colnames(df)),
-                         selectInput("y_var", "Pilih Variabel Y:", choices = numeric_vars)
-                       ),
-                       conditionalPanel(
-                         condition = "input.plot_type == 'Bar Chart' || input.plot_type == 'Histogram'",
-                         selectInput("x_var", "Pilih Variabel:", choices = colnames(df))
-                       ),
-                       conditionalPanel(
-                         condition = "input.plot_type == 'Heatmap'",
-                         checkboxGroupInput("heatmap_vars", "Pilih Variabel:", choices = colnames(selected_columns), selected = colnames(selected_columns))
-                       )
-                ),
-                column(width = 9,
-                       plotOutput("plot", height = "600px", width = "800px")
-                )
-              )
-      ),
-      tabItem(tabName = "analyze_tab",
-              h2(strong("Analyze")),
-              tabsetPanel(
-                tabPanel(strong("Confusion Matrix"),
-                         selectInput("pool_conf", "Jenis Model:",
-                                     choices = c("Deteksi Dini" = "Dini", "Deteksi Lanjutan" = "Lanjutan")),
-                         selectInput("model_conf", "Select Model:",
-                                     choices = c("XGBoost" = "xgboost",
-                                                 "SVM" = "svm",
-                                                 "Logistic Regression" = "glm")),
-                         uiOutput("svm_conf_ui"),
-                         fluidRow(
-                           column(6,
-                                  h3("Training Data"),
-                                  verbatimTextOutput("train_conf_matrix")),
-                           column(6,
-                                  h3("Testing Data"),
-                                  verbatimTextOutput("test_conf_matrix"))
-                         )
-                ),
-                tabPanel(strong("ROC Curve/AUC"),
-                         selectInput("pool_roc", "Jenis Model:",
-                                     choices = c("Deteksi Dini" = "Dini", "Deteksi Lanjutan" = "Lanjutan")),
-                         selectInput("model_roc", "Select Model:",
-                                     choices = c("XGBoost" = "xgboost",
-                                                 "SVM" = "svm",
-                                                 "Logistic Regression" = "glm")),
-                         uiOutput("svm_roc_ui"),
-                         fluidRow(
-                           column(6,
-                                  h3("Training Data"),
-                                  plotOutput("train_roc_plot")),
-                           column(6,
-                                  h3("Testing Data"),
-                                  plotOutput("test_roc_plot"))
-                         )
-                )
-              )
-      ),
-      tabItem(
-        tabName = "performance",
+      uiOutput("tabel_performa"),
+      br(), br(),
+      fluidRow(
+        column(6,
+          div(class = "section-title", "Matriks kesalahan — XGBoost"),
+          uiOutput("confusion_display")
+        ),
+        column(6,
+          div(class = "section-title", "Cara membaca"),
+          uiOutput("narasi_confusion")
+        )
+      )
+    )
+  ),
+
+  nav_panel("Visi Pengembangan", value = "visi",
+    div(class = "container-fluid", style = "max-width:1200px; padding:28px 20px;",
+      div(class = "concept-wrap",
+        div(class = "concept-badge", "Konsep · Belum Diimplementasikan"),
+        h1(class = "headline", "Visi pengembangan: dari prediksi ke pendampingan"),
+        p(class = "section-sub", style = "max-width: 70ch; font-size:0.92rem;",
+          "Versi saat ini hanya memperkirakan risiko dari data akademik anonim. Bila kelak terhubung ke sistem akademik kampus, prediksi dapat menjadi antrian pendampingan yang dikelola dosen wali dan konselor. Halaman ini menggambarkan arah tersebut — belum ada fungsi atau data nyata di baliknya."),
+        br(),
+        div(class = "section-title", "Contoh antrian pendampingan"),
+        tags$table(class = "listing", style = "width:100%; margin-top:10px;",
+          tags$thead(tags$tr(tags$th("Mahasiswa"), tags$th("Skor risiko"), tags$th("Status kontak"), tags$th("Penanggung jawab"))),
+          tags$tbody(
+            tags$tr(tags$td(strong("Mahasiswa A"), br(), span(class="disclaimer","[NIM] · Teknik Informatika")), tags$td("82%", risk_badge(0.82)), tags$td("Belum dihubungi"), tags$td("Dosen wali")),
+            tags$tr(tags$td(strong("Mahasiswa B"), br(), span(class="disclaimer","[NIM] · Agronomi")), tags$td("76%", risk_badge(0.76)), tags$td("Terjadwal"), tags$td("Konselor")),
+            tags$tr(tags$td(strong("Mahasiswa C"), br(), span(class="disclaimer","[NIM] · Manajemen")), tags$td("64%", risk_badge(0.64)), tags$td("Sudah didampingi"), tags$td("Dosen wali")),
+            tags$tr(tags$td(strong("Mahasiswa D"), br(), span(class="disclaimer","[NIM] · Jurnalistik")), tags$td("51%", risk_badge(0.51)), tags$td("Belum dihubungi"), tags$td("Staf beasiswa"))
+          )
+        ),
+        br(),
         fluidRow(
-          box(
-            title = "Performance - Deteksi Dini vs Deteksi Lanjutan",
-            width = 12,
-            status = "primary",
-            solidHeader = TRUE,
-            collapsible = TRUE,
-            tableOutput("performance_table")
+          column(6,
+            div(class = "section-title", "Data tambahan yang dibutuhkan"),
+            tags$ul(
+              tags$li("Identitas mahasiswa (NIM, nama) dari sistem akademik, dengan akses terbatas"),
+              tags$li("Status kontak dan jadwal pendampingan"),
+              tags$li("Catatan pendampingan dari dosen wali atau konselor"),
+              tags$li("Penanggung jawab tiap mahasiswa")
+            )
+          ),
+          column(6,
+            div(class = "section-title", "Pertimbangan sebelum diterapkan"),
+            tags$ul(
+              tags$li("Akses berbasis peran: hanya pendamping yang ditugaskan dapat melihat identitas."),
+              tags$li("Skor risiko tidak ditampilkan ke mahasiswa sebagai label."),
+              tags$li("Prediksi memicu percakapan, bukan sanksi atau keputusan akademik."),
+              tags$li("Model dievaluasi ulang tiap angkatan untuk memeriksa bias antar kelompok.")
+            )
           )
         )
       )
@@ -310,168 +350,52 @@ ui <- dashboardPage(
   )
 )
 
-server <- function(input, output) {
-  output$data_table <- renderDT({
-    datatable(df)
+# ---- Server ----
+server <- function(input, output, session) {
+
+  # ===== Overview =====
+  output$headline_overview <- renderText({
+    sprintf("Hampir %s dari 10 mahasiswa dalam data historis tidak menyelesaikan studinya.",
+            round(historis_dropout * 10))
   })
 
-  output$summary_stats <- renderPrint({
-    summary(df)
-  })
-
-  output$plot <- renderPlot({
-    plot <- NULL
-
-    if (input$plot_type == "Scatter Plot") {
-      plot <- ggplot(df, aes_string(x = input$x_var, y = input$y_var)) +
-        geom_point() +
-        theme_minimal()
-
-    } else if (input$plot_type == "Bar Chart") {
-      counts <- df %>%
-        count(!!sym(input$x_var)) %>%
-        arrange(desc(n))
-      df[[input$x_var]] <- factor(df[[input$x_var]], levels = counts[[input$x_var]])
-      plot <- ggplot(df, aes_string(x = input$x_var)) +
-        geom_bar() +
-        theme_minimal()
-
-    } else if (input$plot_type == "Heatmap") {
-      selected_vars <- input$heatmap_vars
-      corr_df <- cor(df[selected_vars], use = "complete.obs")
-      melted_corr_df <- melt(corr_df)
-
-      plot <- ggplot(melted_corr_df, aes(Var1, Var2, fill = value)) +
-        geom_tile() +
-        geom_text(aes(label = round(value, 2)), color = "black", size = 4) +
-        scale_fill_gradient2(low = "blue", high = "red", mid = "white",
-                             midpoint = 0, limit = c(-1, 1), space = "Lab",
-                             name="Correlation") +
-        theme_minimal() +
-        theme(axis.text.x = element_text(angle = 45, vjust = 1, size = 12, hjust = 1),
-              axis.text.y = element_text(size = 12),
-              axis.title = element_text(size = 14),
-              plot.title = element_text(size = 16, hjust = 0.5)) +
-        coord_fixed()
-
-    } else if (input$plot_type == "Box Plot") {
-      if (input$x_var %in% categorical_vars) {
-        plot <- ggplot(df, aes_string(x = paste0("as.factor(", input$x_var, ")"), y = input$y_var)) +
-          geom_boxplot() +
-          theme_minimal()
-      } else {
-        plot <- ggplot(df, aes_string(x = input$x_var, y = input$y_var)) +
-          geom_boxplot() +
-          theme_minimal()
-      }
-
-    } else if (input$plot_type == "Histogram") {
-      plot <- ggplot(df, aes_string(x = input$x_var)) +
-        geom_histogram(binwidth = 1, color="black", fill="#96C9F4") +
-        theme_minimal()
-
-    } else if (input$plot_type == "Violin Plot") {
-      if (input$x_var %in% categorical_vars) {
-        plot <- ggplot(df, aes_string(x = paste0("as.factor(", input$x_var, ")"), y = input$y_var)) +
-          geom_violin() +
-          theme_minimal()
-      } else {
-        plot <- ggplot(df, aes_string(x = input$x_var, y = input$y_var)) +
-          geom_violin() +
-          theme_minimal()
-      }
-    }
-
-    print(plot)
-  })
-
-  # ---- Analyze ----
-  selected_model_conf <- reactive({
-    suite <- model_pools[[input$pool_conf]]$models
-    if (input$model_conf == "svm") {
-      suite[[paste("svm", input$svm_conf_kernel, sep = "_")]]
-    } else {
-      suite[[input$model_conf]]
-    }
-  })
-
-  selected_model_roc <- reactive({
-    suite <- model_pools[[input$pool_roc]]$models
-    if (input$model_roc == "svm") {
-      suite[[paste("svm", input$svm_roc_kernel, sep = "_")]]
-    } else {
-      suite[[input$model_roc]]
-    }
-  })
-
-  output$svm_conf_ui <- renderUI({
-    if (input$model_conf == "svm") {
-      selectInput("svm_conf_kernel", "Select SVM Kernel:",
-                  choices = c("Linear Kernel" = "linear",
-                              "Polynomial Kernel" = "poly",
-                              "RBF Kernel" = "radial"))
-    }
-  })
-
-  output$svm_roc_ui <- renderUI({
-    if (input$model_roc == "svm") {
-      selectInput("svm_roc_kernel", "Select SVM Kernel:",
-                  choices = c("Linear Kernel" = "linear",
-                              "Polynomial Kernel" = "poly",
-                              "RBF Kernel" = "radial"))
-    }
-  })
-
-  output$train_conf_matrix <- renderPrint({
-    selected_model_conf()$train$conf_matrix
-  })
-
-  output$test_conf_matrix <- renderPrint({
-    selected_model_conf()$test$conf_matrix
-  })
-
-  output$train_roc_plot <- renderPlot({
-    roc_train <- selected_model_roc()$train$roc
-    plot(roc_train, main = paste("Training ROC Curve -", input$model_roc), col = "blue", lwd = 2)
-    text(0.6, 0.2, paste("AUC =", round(as.numeric(auc(roc_train)), 2)), col = "blue")
-  })
-
-  output$test_roc_plot <- renderPlot({
-    roc_test <- selected_model_roc()$test$roc
-    plot(roc_test, main = paste("Testing ROC Curve -", input$model_roc), col = "red", lwd = 2)
-    text(0.6, 0.2, paste("AUC =", round(as.numeric(auc(roc_test)), 2)), col = "red")
-  })
-
-  # ---- Performance ----
-  output$performance_table <- renderTable({
-    nama_model <- c(xgboost = "XGBoost", svm_linear = "SVM Linear", svm_poly = "SVM Polynomial",
-                     svm_radial = "SVM Radial", glm = "Logistic Regression")
-
-    baris <- function(label_pool, suite) {
-      do.call(rbind, lapply(names(suite), function(nama) {
-        m <- suite[[nama]]
-        data.frame(
-          Pool = label_pool,
-          Model = nama_model[[nama]],
-          Train_Accuracy = round(m$train$accuracy, 3),
-          Test_Accuracy = round(m$test$accuracy, 3),
-          Test_Sensitivity = round(m$test$sensitivity, 3),
-          Test_Specificity = round(m$test$specificity, 3),
-          Test_AUC = round(m$test$auc, 3)
-        )
-      }))
-    }
-
-    rbind(
-      baris("Deteksi Dini", model_dini$models),
-      baris("Deteksi Lanjutan", model_lanjutan$models)
+  output$tabel_prodi <- renderUI({
+    rata2 <- historis_dropout
+    baris <- lapply(seq_len(nrow(per_prodi_overview)), function(i) {
+      p <- per_prodi_overview[i, ]
+      tags$tr(class = "prodi-row",
+        onclick = sprintf("Shiny.setInputValue('prodi_clicked', '%s', {priority: 'event'})", p$nama_prodi),
+        tags$td(p$nama_prodi),
+        tags$td(style = "width:45%;", HTML(bar_html(p$dropout_rate, rata2, "var(--tinta)"))),
+        tags$td(style = "text-align:right; font-weight:700;", paste0(round(p$dropout_rate * 100, 1), "%")),
+        tags$td(style = "width:16px; color:var(--abu-teks);", "›")
+      )
+    })
+    tags$table(class = "listing",
+      tags$thead(tags$tr(tags$th("Program Studi"), tags$th(""), tags$th(style="text-align:right;","Drop-out"), tags$th(""))),
+      tags$tbody(baris)
     )
   })
 
-  # ---- Prediksi ----
+  observeEvent(input$prodi_clicked, {
+    updateSelectInput(session, "filter_prodi",
+                       choices = c("Semua program studi", per_prodi$nama_prodi),
+                       selected = input$prodi_clicked)
+    nav_select("main_nav", selected = "eksplorasi", session = session)
+  })
+  observeEvent(input$ke_prediksi, nav_select("main_nav", selected = "prediksi", session = session))
+  observeEvent(input$ke_eksplorasi, nav_select("main_nav", selected = "eksplorasi", session = session))
+  observeEvent(input$ke_performa, nav_select("main_nav", selected = "performa", session = session))
+
+  # ===== Prediksi Risiko =====
   output$pred_form <- renderUI({
     fitur <- model_pools[[input$pred_pool]]$fitur
-    tagList(lapply(fitur, buat_input_prediksi))
+    ada <- function(grp) intersect(grp, fitur)
+    tagList(
+      if (length(ada(fitur_akademik)) > 0) tagList(div(class = "form-group-label", "Data Akademik"), lapply(ada(fitur_akademik), buat_input_prediksi)),
+      if (length(ada(fitur_pendaftaran)) > 0) tagList(div(class = "form-group-label", "Data Pendaftaran"), lapply(ada(fitur_pendaftaran), buat_input_prediksi)),
+      if (length(ada(fitur_performa)) > 0) tagList(div(class = "form-group-label", "Performa Semester 1-2"), lapply(ada(fitur_performa), buat_input_prediksi))
+    )
   })
 
   hasil_prediksi <- reactiveVal(NULL)
@@ -492,28 +416,159 @@ server <- function(input, output) {
     new_data <- as.data.frame(nilai, stringsAsFactors = FALSE)
 
     new_data_preproc <- bake(model_pools[[pool]]$recipe, new_data = new_data)
-    prob_dropout <- predict(model_pools[[pool]]$models$xgboost$model, as.matrix(new_data_preproc))
+    prob_dropout <- as.numeric(predict(model_pools[[pool]]$models$xgboost$model, as.matrix(new_data_preproc)))
 
-    kategori <- if (prob_dropout >= 0.7) "Tinggi" else if (prob_dropout >= 0.4) "Sedang" else "Rendah"
-    warna <- if (prob_dropout >= 0.7) "#d9534f" else if (prob_dropout >= 0.4) "#f0ad4e" else "#5cb85c"
-
-    hasil_prediksi(list(prob = prob_dropout, kategori = kategori, warna = warna, pool = pool))
+    hasil_prediksi(list(prob = prob_dropout, pool = pool))
   })
+
+  observeEvent(input$reset_pred, hasil_prediksi(NULL))
 
   output$prediction_result <- renderUI({
     hp <- hasil_prediksi()
     if (is.null(hp)) {
-      return(p("Isi data di sebelah kiri, lalu klik Prediksi.", style = "color: #888;"))
+      return(div(class = "result-card",
+                  div(class = "result-eyebrow", "Hasil prediksi"),
+                  p(style = "color:var(--abu-teks); margin-top:10px;", "Isi data di sebelah kiri, lalu klik “Hitung risiko”.")))
     }
+    k <- risk_kategori(hp$prob)
+    pos <- hp$prob * 100
     tagList(
-      h3(paste0("Risiko Drop Out: ", round(hp$prob * 100, 1), "%")),
-      div(strong(paste("Kategori Risiko:", hp$kategori)),
-          style = paste0("color: white; background-color: ", hp$warna,
-                         "; padding: 10px 16px; border-radius: 6px; display: inline-block;")),
-      p(style = "margin-top:15px; color:#555;",
-        paste0("Model yang digunakan: ",
-               if (hp$pool == "Dini") "Deteksi Dini (variabel saat pendaftaran)."
-               else "Deteksi Lanjutan (performa semester 1-2)."))
+      div(class = "result-card",
+        div(class = "result-eyebrow", sprintf("Hasil prediksi · Deteksi %s · XGBoost", hp$pool)),
+        div(class = paste("result-number", k$kelas), paste0(round(pos, 1), "%")),
+        div(risk_badge(hp$prob)),
+        div(class = "risk-scale",
+          div(class = "seg", style = "width:30%; background:#DCEFE1;"),
+          div(class = "seg", style = "width:30%; background:#F3E3C4;"),
+          div(class = "seg", style = "width:40%; background:#F3D3CD;"),
+          div(class = "tick", style = sprintf("left:%.1f%%;", pos))
+        ),
+        div(class = "scale-labels", span("Rendah <30%"), span("Sedang 30-60%"), span("Tinggi ≥60%")),
+        div(class = "form-group-label", "Tindak lanjut yang disarankan"),
+        p(class = "narasi", style = "font-size:1.05rem;", saran_tindak_lanjut(hp$prob)),
+        p(class = "disclaimer", "Saran disusun dari aturan per kategori risiko, bukan keputusan otomatis. Gunakan bersama pertimbangan dosen wali atau konselor.")
+      )
+    )
+  })
+
+  # ===== Eksplorasi Data =====
+  df_terfilter <- reactive({
+    d <- df %>% mutate(nama_prodi = unname(course_labels[as.character(course)]))
+    if (input$filter_prodi != "Semua program studi") d <- d %>% filter(nama_prodi == input$filter_prodi)
+    if (input$filter_waktu == "Siang") d <- d %>% filter(timeof_attendance == "0")
+    if (input$filter_waktu == "Malam") d <- d %>% filter(timeof_attendance == "1")
+    d
+  })
+
+  output$n_terfilter <- renderText(format(nrow(df_terfilter()), big.mark = ".", decimal.mark = ","))
+
+  buat_breakdown <- function(d, var, label_map = NULL, judul) {
+    rata2 <- mean(d$target == "Dropout")
+    ringkas <- d %>% group_by(.data[[var]]) %>%
+      summarise(n = n(), dropout = mean(target == "Dropout"), .groups = "drop")
+    if (!is.null(label_map)) ringkas[[var]] <- label_map[as.character(ringkas[[var]])]
+    baris <- lapply(seq_len(nrow(ringkas)), function(i) {
+      r <- ringkas[i, ]
+      tags$tr(tags$td(as.character(r[[var]])), tags$td(style="text-align:right;", format(r$n, big.mark=".", decimal.mark=",")),
+              tags$td(style = "width:40%;", HTML(bar_html(r$dropout, rata2, "var(--tinta)"))),
+              tags$td(style = "text-align:right; font-weight:700;", paste0(round(r$dropout * 100, 1), "%")))
+    })
+    div(style = "margin-bottom:26px;",
+      div(class = "section-title", style = "font-size:1.02rem;", judul),
+      tags$table(class = "listing",
+        tags$thead(tags$tr(tags$th("Kategori"), tags$th(style="text-align:right;","N"), tags$th(""), tags$th(style="text-align:right;","Drop-out"))),
+        tags$tbody(baris)
+      )
+    )
+  }
+
+  output$breakdown_eksplorasi <- renderUI({
+    d <- df_terfilter()
+    tagList(
+      fluidRow(
+        column(4, buat_breakdown(d, "scholarship", c("0" = "Bukan penerima", "1" = "Penerima"), "Status beasiswa")),
+        column(4, buat_breakdown(d, "timeof_attendance", c("0" = "Siang", "1" = "Malam"), "Waktu kuliah")),
+        column(4, buat_breakdown(d, "gender", c("0" = "Laki-laki", "1" = "Perempuan"), "Jenis kelamin"))
+      ),
+      fluidRow(
+        column(6, {
+          d2 <- d %>% mutate(bin = cut(age_enroll, c(0, 20, 25, 150), labels = c("≤20 tahun", "21-25 tahun", ">25 tahun")))
+          buat_breakdown(d2, "bin", NULL, "Usia saat mendaftar")
+        }),
+        column(6, {
+          d2 <- d %>% mutate(bin = cut(second_approve, c(-1, 0, 3, 6, 100), labels = c("0 unit", "1-3 unit", "4-6 unit", "7+ unit")))
+          buat_breakdown(d2, "bin", NULL, "Unit lulus semester 2")
+        })
+      )
+    )
+  })
+
+  # ===== Performa Model =====
+  output$tabel_performa <- renderUI({
+    suite <- model_pools[[input$pool_performa]]$models
+    urutan <- c("glm", "svm_linear", "svm_poly", "svm_radial", "xgboost")
+    # XGBoost dipilih sebagai mesin Prediksi Risiko karena paling seimbang
+    # (terutama sensitivity di pool Dini) -- bukan cuma akurasi tertinggi,
+    # jadi label di sini harus konsisten dengan pilihan itu, bukan dihitung
+    # ulang dari which.max(accuracy) yang bisa menunjuk model lain.
+    dipakai <- "xgboost"
+    baris <- lapply(urutan, function(n) {
+      m <- suite[[n]]
+      tags$tr(class = if (n == dipakai) "baris-terbaik" else "",
+        tags$td(nama_model[[n]], if (n == dipakai) span(class="disclaimer", " DIPAKAI DI PREDIKSI RISIKO") else NULL),
+        tags$td(style="text-align:right;", paste0(round(m$test$accuracy * 100, 1), "%")),
+        tags$td(style="text-align:right;", paste0(round(m$test$sensitivity * 100, 1), "%")),
+        tags$td(style="text-align:right;", paste0(round(m$test$specificity * 100, 1), "%")),
+        tags$td(style="text-align:right;", sprintf("%.2f", m$test$auc))
+      )
+    })
+    tags$table(class = "listing perf-table",
+      tags$thead(tags$tr(tags$th("Algoritma"), tags$th(style="text-align:right;","Akurasi"),
+                          tags$th(style="text-align:right;","Sensitivity"), tags$th(style="text-align:right;","Specificity"),
+                          tags$th(style="text-align:right;","AUC"))),
+      tags$tbody(baris)
+    )
+  })
+
+  cm_aktif <- reactive({
+    model_pools[[input$pool_performa]]$models$xgboost$test$conf_matrix$table
+  })
+
+  output$confusion_display <- renderUI({
+    cm <- cm_aktif()
+    n_total <- sum(cm)
+    tp <- cm["Dropout", "Dropout"]; fn <- cm["Lulus", "Dropout"]
+    fp <- cm["Dropout", "Lulus"];   tn <- cm["Lulus", "Lulus"]
+    tagList(
+      p(class = "disclaimer", sprintf("%s mahasiswa pada data uji", format(n_total, big.mark=".", decimal.mark=","))),
+      div(class = "confusion-grid",
+        div(), div(class="head", "Diprediksi drop-out"), div(class="head", "Diprediksi bertahan"),
+        div(class="head", "Aktual drop-out"),
+        div(class = "sel-benar", div(class="angka", tp), div(class="ket", "terdeteksi")),
+        div(div(class="angka", fn), div(class="ket", "terlewat")),
+        div(class="head", "Aktual bertahan"),
+        div(div(class="angka", fp), div(class="ket", "peringatan berlebih")),
+        div(div(class="angka", tn), div(class="ket", "tepat bertahan"))
+      )
+    )
+  })
+
+  output$narasi_confusion <- renderUI({
+    cm <- cm_aktif()
+    tp <- cm["Dropout", "Dropout"]; fn <- cm["Lulus", "Dropout"]
+    aktual_dropout <- tp + fn
+    tagList(
+      p(class = "narasi", sprintf(
+        "Dari %d mahasiswa yang benar-benar drop-out, model menemukan %d di antaranya. Inilah yang diukur oleh sensitivity (%s).",
+        aktual_dropout, tp, paste0(round(tp/aktual_dropout*100,1), "%")
+      )),
+      p(class = "narasi", sprintf(
+        "%d mahasiswa terlewat, yaitu diprediksi bertahan padahal drop-out. Kesalahan jenis ini paling perlu diperhatikan, karena mahasiswa tersebut tidak akan muncul di daftar prioritas pendampingan.", fn
+      )),
+      p(class = "disclaimer", sprintf(
+        "Angka akurasi %s%% (XGBoost, Deteksi %s) dan matriks ini seluruhnya dihitung dari data uji asli.",
+        round(model_pools[[input$pool_performa]]$models$xgboost$test$accuracy * 100, 1), input$pool_performa
+      ))
     )
   })
 }
