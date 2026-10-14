@@ -1,6 +1,9 @@
 #
 # RETENSI - Dashboard Prediksi Risiko Drop Out Mahasiswa
-# Redesign v2: bslib (Bootstrap 5), lihat README untuk detail desain.
+#
+# Dataset: Realinho, V., Machado, J., Baptista, L., & Martins, M.V. (2021).
+# Predict students' dropout and academic success (Version 1.0) [Dataset].
+# Zenodo. https://doi.org/10.5281/zenodo.5777340
 #
 # Model dilatih di train_models.R (dijalankan manual), hasilnya di
 # model_results_dini.rds / model_results_lanjutan.rds -- app ini cuma load.
@@ -12,38 +15,23 @@ library(recipes)
 library(xgboost)
 library(dplyr)
 
-# ---- Data & model ----
-df <- read.csv("data.csv", sep = ";", header = TRUE)
+source("data_prep.R")
 
-categorical_vars <- c("course", "timeof_attendance", "prev_quali", "gender", "scholarship")
-df <- df %>% mutate(across(all_of(categorical_vars), as.factor))
-df$target <- factor(ifelse(df$target == 0, "Dropout", "Lulus"), levels = c("Lulus", "Dropout"))
+# ---- Data & model ----
+df <- muat_data_mentah()
+df <- df %>% mutate(across(all_of(kolom_kategorikal), as.factor))
+df <- siapkan_target(df)
 
 model_dini     <- readRDS("model_results_dini.rds")
 model_lanjutan <- readRDS("model_results_lanjutan.rds")
 model_pools    <- list(Dini = model_dini, Lanjutan = model_lanjutan)
 
-course_labels <- c(
-  "33" = "Teknologi Produksi Biofuel", "171" = "Animasi dan Desain Multimedia",
-  "8014" = "Layanan Sosial (malam)", "9003" = "Agronomi",
-  "9070" = "Desain Komunikasi", "9085" = "Keperawatan Hewan",
-  "9119" = "Teknik Informatika", "9130" = "Persamaan Budaya",
-  "9147" = "Manajemen", "9238" = "Layanan Sosial",
-  "9254" = "Pariwisata", "9500" = "Keperawatan",
-  "9556" = "Kebersihan Mulut", "9670" = "Manajemen Periklanan & Pemasaran",
-  "9773" = "Jurnalisme dan Komunikasi", "9853" = "Pendidikan Dasar",
-  "9991" = "Manajemen (malam)"
-)
-course_choices <- setNames(names(course_labels), paste0(names(course_labels), ": ", course_labels))
-
-total_mahasiswa   <- nrow(df)
-historis_dropout  <- mean(df$target == "Dropout")
-# XGBoost: model yang dipakai di tab Prediksi Risiko (lihat tabel_performa
-# di server soal kenapa ini, bukan model dengan akurasi tertinggi semata).
+total_mahasiswa       <- nrow(df)
+historis_dropout      <- mean(df$target == "Dropout")
 akurasi_model_dipakai <- model_lanjutan$models$xgboost$test$accuracy
 
 # Breakdown per prodi -- program studi dengan n < 20 dikecualikan (sampel
-# terlalu kecil buat jadi sorotan, lihat n=4 "Teknologi Produksi Biofuel").
+# terlalu kecil buat jadi sorotan).
 per_prodi <- df %>%
   mutate(nama_prodi = unname(course_labels[as.character(course)])) %>%
   group_by(nama_prodi) %>%
@@ -54,6 +42,37 @@ per_prodi_overview <- head(per_prodi, 8)
 
 nama_model <- c(glm = "Regresi Logistik", svm_linear = "SVM Linear", svm_poly = "SVM Polynomial",
                  svm_radial = "SVM Radial", xgboost = "XGBoost")
+
+# ---- Fitur mana yang ditonjolkan di form Prediksi vs disembunyikan di
+#      "Variabel Lainnya" (dengan nilai default) -- dipakai utk pool yang
+#      fitur-nya banyak (Lanjutan, 34 fitur). Diurutkan dari kontribusi
+#      (XGBoost gain) tertinggi, dihitung langsung dari model, bukan
+#      di-hardcode -- supaya otomatis ikut kalau model dilatih ulang.
+urutkan_fitur_by_importance <- function(model_suite) {
+  imp <- xgb.importance(model = model_suite$models$xgboost$model)
+  fitur <- model_suite$fitur
+  imp$fitur_asli <- sapply(imp$Feature, function(nm) {
+    cocok <- fitur[sapply(fitur, function(f) startsWith(nm, f))]
+    if (length(cocok) == 0) return(NA_character_)
+    cocok[which.max(nchar(cocok))]
+  })
+  ringkas <- imp %>% filter(!is.na(fitur_asli)) %>%
+    group_by(fitur_asli) %>% summarise(gain = sum(Gain), .groups = "drop") %>%
+    arrange(desc(gain))
+  c(ringkas$fitur_asli, setdiff(fitur, ringkas$fitur_asli))
+}
+
+urutan_fitur_pool <- lapply(model_pools, urutkan_fitur_by_importance)
+N_UTAMA <- 12
+
+nilai_default <- function(kolom) {
+  x <- df[[kolom]]
+  if (is.numeric(x)) {
+    round(median(x, na.rm = TRUE), 1)
+  } else {
+    names(sort(table(x), decreasing = TRUE))[1]
+  }
+}
 
 # ---- Helper UI kecil ----
 bar_html <- function(pct, rata_rata = NULL, warna = "var(--abu-teks)") {
@@ -83,37 +102,59 @@ saran_tindak_lanjut <- function(prob) {
   else "Risiko rendah berdasarkan data saat ini; tidak ada tindakan khusus yang disarankan."
 }
 
-buat_input_prediksi <- function(fitur) {
-  switch(fitur,
-    course = selectInput("pred_course", "Program studi", choices = course_choices),
-    timeof_attendance = radioButtons("pred_timeof_attendance", "Waktu kuliah",
-                                      choices = c("Malam" = "0", "Siang" = "1"), inline = TRUE),
-    prev_quali = selectInput("pred_prev_quali", "Pendidikan sebelumnya (kode)",
-                              choices = setNames(levels(df$prev_quali), levels(df$prev_quali))),
-    prev_quali_grade = numericInput("pred_prev_quali_grade", "Nilai pendidikan sebelumnya (0-200)",
-                                     value = 130, min = 0, max = 200),
-    admiss_grade = numericInput("pred_admiss_grade", "Nilai penerimaan (0-200)",
-                                 value = 130, min = 0, max = 200),
-    gender = radioButtons("pred_gender", "Jenis kelamin",
-                           choices = c("Perempuan" = "1", "Laki-laki" = "0"), inline = TRUE),
-    scholarship = radioButtons("pred_scholarship", "Penerima beasiswa",
-                                choices = c("Ya" = "1", "Tidak" = "0"), inline = TRUE),
-    age_enroll = numericInput("pred_age_enroll", "Usia saat mendaftar", value = 19, min = 16, max = 70),
-    first_enroll = numericInput("pred_first_enroll", "Semester 1 — unit kurikuler terdaftar",
-                                 value = 6, min = 0, max = 30),
-    first_approve = numericInput("pred_first_approve", "Semester 1 — unit kurikuler lulus",
-                                  value = 6, min = 0, max = 30),
-    second_enroll = numericInput("pred_second_enroll", "Semester 2 — unit kurikuler terdaftar",
-                                  value = 6, min = 0, max = 30),
-    second_approve = numericInput("pred_second_approve", "Semester 2 — unit kurikuler lulus",
-                                   value = 6, min = 0, max = 30)
-  )
-}
+# Field kategorikal -> label map; field numerik nggak perlu disebut di sini.
+field_label_map <- list(
+  course = course_labels, application_mode = application_mode_labels,
+  prev_quali = prev_quali_labels, mother_quali = parent_quali_labels,
+  father_quali = parent_quali_labels, mother_occup = occup_labels,
+  father_occup = occup_labels, nationality = nationality_labels,
+  tuition_ok = ya_tidak_labels, scholarship = ya_tidak_labels, debtor = ya_tidak_labels,
+  displaced = ya_tidak_labels, international = ya_tidak_labels,
+  gender = gender_labels, timeof_attendance = waktu_labels
+)
 
-fitur_akademik   <- c("course", "admiss_grade")
-fitur_pendaftaran <- c("age_enroll", "timeof_attendance", "prev_quali", "prev_quali_grade",
-                        "gender", "scholarship")
-fitur_performa   <- c("first_enroll", "first_approve", "second_enroll", "second_approve")
+field_judul <- c(
+  course = "Program studi", application_mode = "Mode pendaftaran",
+  application_order = "Urutan pilihan (0 = pilihan pertama)",
+  prev_quali = "Pendidikan sebelumnya", prev_quali_grade = "Nilai pendidikan sebelumnya (0-200)",
+  admiss_grade = "Nilai penerimaan (0-200)", mother_quali = "Pendidikan Ibu",
+  father_quali = "Pendidikan Ayah", mother_occup = "Pekerjaan Ibu", father_occup = "Pekerjaan Ayah",
+  nationality = "Kewarganegaraan", tuition_ok = "UKT lunas tepat waktu", debtor = "Status utang/tunggakan",
+  scholarship = "Penerima beasiswa", displaced = "Status perantau (displaced)",
+  international = "Mahasiswa internasional", gender = "Jenis kelamin",
+  timeof_attendance = "Waktu kuliah", age_enroll = "Usia saat mendaftar",
+  first_enroll = "Semester 1 - Mata kuliah terdaftar", first_approve = "Semester 1 - Mata kuliah lulus",
+  first_credited = "Semester 1 - Mata kuliah diakui (credit transfer)",
+  first_eval = "Semester 1 - Jumlah evaluasi", first_grade = "Semester 1 - Rata-rata nilai (0-20)",
+  first_no_eval = "Semester 1 - Mata kuliah tanpa evaluasi",
+  second_enroll = "Semester 2 - Mata kuliah terdaftar", second_approve = "Semester 2 - Mata kuliah lulus",
+  second_credited = "Semester 2 - Mata kuliah diakui (credit transfer)",
+  second_eval = "Semester 2 - Jumlah evaluasi", second_grade = "Semester 2 - Rata-rata nilai (0-20)",
+  second_no_eval = "Semester 2 - Mata kuliah tanpa evaluasi",
+  unemployment_rate = "Tingkat pengangguran (%) saat masuk", inflation_rate = "Tingkat inflasi (%) saat masuk",
+  gdp = "Pertumbuhan GDP (%) saat masuk"
+)
+
+buat_input_prediksi <- function(fitur) {
+  id <- paste0("pred_", fitur)
+  default <- nilai_default(fitur)
+  judul <- field_judul[[fitur]]
+  if (fitur %in% names(field_label_map)) {
+    label_map <- field_label_map[[fitur]]
+    choices <- if (fitur %in% c("tuition_ok", "scholarship", "debtor", "displaced", "international", "gender", "timeof_attendance")) {
+      setNames(names(label_map), label_map)
+    } else {
+      setNames(names(label_map), paste0(names(label_map), ": ", label_map))
+    }
+    if (fitur %in% c("tuition_ok", "scholarship", "debtor", "displaced", "international", "gender", "timeof_attendance")) {
+      radioButtons(id, judul, choices = choices, selected = as.character(default), inline = TRUE)
+    } else {
+      selectInput(id, judul, choices = choices, selected = as.character(default))
+    }
+  } else {
+    numericInput(id, judul, value = as.numeric(default))
+  }
+}
 
 # ---- CSS ----
 css_tambahan <- tags$head(
@@ -136,10 +177,8 @@ css_tambahan <- tags$head(
     .brand-main { font-size: 1.2rem; font-weight: 800; letter-spacing: 0.01em; line-height: 1.15; }
     .brand-sub { font-size: 0.76rem; color: var(--abu-teks); font-weight: 600; line-height: 1.2; margin-top: 2px; }
     .navbar .navbar-nav { align-items: center; }
-    .nav-link { color: var(--tinta) !important; font-weight: 600; }
-    .nav-link.active { border-bottom: 2px solid var(--tinta); }
     .eyebrow { font-size: 0.74rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--abu-teks); margin-bottom: 6px; }
-    h1.headline { font-size: 2rem; font-weight: 800; letter-spacing: -0.01em; max-width: 24ch; }
+    h1.headline { font-size: 2rem; font-weight: 800; letter-spacing: -0.01em; max-width: 26ch; }
     .stat-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 24px; margin: 28px 0; }
     .stat-block { border-top: 2px solid var(--tinta); padding-top: 10px; }
     .stat-label { font-size: 0.78rem; color: var(--abu-teks); font-weight: 600; margin-bottom: 4px; }
@@ -191,6 +230,9 @@ css_tambahan <- tags$head(
     .confusion-grid .sel-benar { background: var(--tinta); color: #fff; }
     .confusion-grid .angka { font-size: 1.6rem; font-weight: 800; }
     .confusion-grid .ket { font-size: 0.74rem; opacity: 0.8; }
+    details.lainnya { border: 1px solid var(--abu-garis); border-radius: 4px; padding: 12px 16px; margin-top: 16px; }
+    details.lainnya summary { cursor: pointer; font-weight: 700; font-size: 0.86rem; }
+    details.lainnya .isi { margin-top: 14px; }
   "))
 )
 
@@ -210,7 +252,7 @@ ui <- page_navbar(
       div(class = "eyebrow", "Ringkasan data historis"),
       h1(class = "headline", textOutput("headline_overview", inline = TRUE)),
       p(class = "section-sub", style = "max-width:70ch; margin-top:10px;",
-        "Dashboard ini memperkirakan risiko drop-out dari data pendaftaran dan performa akademik awal, sehingga pendampingan dapat dipertimbangkan sebelum masalah akademik berlanjut."),
+        "Dashboard ini memperkirakan risiko drop-out dari data pendaftaran, latar belakang sosial-ekonomi, dan performa akademik awal, sehingga pendampingan dapat dipertimbangkan sebelum masalah akademik berlanjut."),
       div(class = "stat-strip",
         div(class = "stat-block",
             div(class = "stat-label", "Total Mahasiswa"),
@@ -243,7 +285,7 @@ ui <- page_navbar(
                     span(class="section-sub", "Seberapa tepat model, dan di mana ia masih keliru."))
           ),
           p(class = "disclaimer", style="margin-top:20px;",
-            "Sumber: 13 variabel data akademik anonim (program studi, waktu kuliah, pendidikan sebelumnya, nilai penerimaan, usia, jenis kelamin, beasiswa, unit kurikuler semester 1-2).")
+            "Sumber: Realinho, V., Machado, J., Baptista, L., & Martins, M.V. (2021). Predict students' dropout and academic success [Dataset]. Zenodo. doi.org/10.5281/zenodo.5777340")
         )
       )
     )
@@ -273,10 +315,9 @@ ui <- page_navbar(
       div(class = "eyebrow", "Eksplorasi data"),
       h1(class = "headline", "Proporsi drop-out menurut karakteristik mahasiswa"),
       fluidRow(
-        column(4, selectInput("filter_prodi", "Filter program studi",
+        column(6, selectInput("filter_prodi", "Filter program studi",
                                choices = c("Semua program studi", per_prodi$nama_prodi))),
-        column(4, selectInput("filter_waktu", "Waktu kuliah", choices = c("Semua", "Siang", "Malam"))),
-        column(4, div(style = "text-align:right; padding-top:28px;",
+        column(6, div(style = "text-align:right; padding-top:28px;",
                        span(style = "font-size:1.6rem; font-weight:800;", textOutput("n_terfilter", inline = TRUE)),
                        span(class = "disclaimer", " mahasiswa"))
         )
@@ -320,7 +361,7 @@ ui <- page_navbar(
         div(class = "concept-badge", "Konsep · Belum Diimplementasikan"),
         h1(class = "headline", "Visi pengembangan: dari prediksi ke pendampingan"),
         p(class = "section-sub", style = "max-width: 70ch; font-size:0.92rem;",
-          "Versi saat ini hanya memperkirakan risiko dari data akademik anonim. Bila kelak terhubung ke sistem akademik kampus, prediksi dapat menjadi antrian pendampingan yang dikelola dosen wali dan konselor. Halaman ini menggambarkan arah tersebut — belum ada fungsi atau data nyata di baliknya."),
+          "Versi saat ini hanya memperkirakan risiko dari data akademik dan sosial-ekonomi anonim. Bila kelak terhubung ke sistem akademik kampus, prediksi dapat menjadi antrian pendampingan yang dikelola dosen wali dan konselor. Halaman ini menggambarkan arah tersebut — belum ada fungsi atau data nyata di baliknya."),
         br(),
         div(class = "section-title", "Contoh antrian pendampingan"),
         tags$table(class = "listing", style = "width:100%; margin-top:10px;",
@@ -349,7 +390,7 @@ ui <- page_navbar(
               tags$li("Akses berbasis peran: hanya pendamping yang ditugaskan dapat melihat identitas."),
               tags$li("Skor risiko tidak ditampilkan ke mahasiswa sebagai label."),
               tags$li("Prediksi memicu percakapan, bukan sanksi atau keputusan akademik."),
-              tags$li("Model dievaluasi ulang tiap angkatan untuk memeriksa bias antar kelompok.")
+              tags$li("Model dievaluasi ulang tiap angkatan untuk memeriksa bias antar kelompok, termasuk variabel sosial-ekonomi.")
             )
           )
         )
@@ -363,7 +404,7 @@ server <- function(input, output, session) {
 
   # ===== Overview =====
   output$headline_overview <- renderText({
-    sprintf("Hampir %s dari 10 mahasiswa dalam data historis tidak menyelesaikan studinya.",
+    sprintf("Hampir %s dari 10 mahasiswa dalam data historis tidak bertahan sampai selesai.",
             round(historis_dropout * 10))
   })
 
@@ -404,7 +445,7 @@ server <- function(input, output, session) {
       list(nilai = "Dini", judul = "Deteksi Dini",
            ket = "Dipakai saat pendaftaran, ketika belum ada data akademik di perguruan tinggi."),
       list(nilai = "Lanjutan", judul = "Deteksi Lanjutan",
-           ket = "Dipakai setelah mahasiswa melewati semester 1-2, dengan data unit kurikuler terdaftar dan lulus.")
+           ket = "Dipakai setelah mahasiswa melewati semester 1-2, dengan data performa akademik.")
     )
     div(class = "model-option-group",
       lapply(pilihan, function(p) {
@@ -419,12 +460,19 @@ server <- function(input, output, session) {
   })
 
   output$pred_form <- renderUI({
-    fitur <- model_pools[[pool_dipilih()]]$fitur
-    ada <- function(grp) intersect(grp, fitur)
+    fitur_urut <- urutan_fitur_pool[[pool_dipilih()]]
+    utama   <- head(fitur_urut, N_UTAMA)
+    lainnya <- setdiff(fitur_urut, utama)
+
     tagList(
-      if (length(ada(fitur_akademik)) > 0) tagList(div(class = "form-group-label", "Data Akademik"), lapply(ada(fitur_akademik), buat_input_prediksi)),
-      if (length(ada(fitur_pendaftaran)) > 0) tagList(div(class = "form-group-label", "Data Pendaftaran"), lapply(ada(fitur_pendaftaran), buat_input_prediksi)),
-      if (length(ada(fitur_performa)) > 0) tagList(div(class = "form-group-label", "Performa Semester 1-2"), lapply(ada(fitur_performa), buat_input_prediksi))
+      div(class = "form-group-label", "Variabel utama (paling berpengaruh)"),
+      lapply(utama, buat_input_prediksi),
+      if (length(lainnya) > 0) {
+        tags$details(class = "lainnya",
+          tags$summary(sprintf("Variabel lainnya (%d) — opsional, sudah diisi nilai tipikal", length(lainnya))),
+          div(class = "isi", lapply(lainnya, buat_input_prediksi))
+        )
+      }
     )
   })
 
@@ -436,8 +484,9 @@ server <- function(input, output, session) {
 
     nilai <- lapply(fitur, function(f) {
       v <- input[[paste0("pred_", f)]]
-      if (f %in% c("course", "timeof_attendance", "prev_quali", "gender", "scholarship")) {
-        factor(v, levels = levels(df[[f]]))
+      if (is.null(v)) v <- nilai_default(f)
+      if (f %in% kolom_kategorikal) {
+        factor(as.character(v), levels = levels(df[[f]]))
       } else {
         as.numeric(v)
       }
@@ -485,8 +534,6 @@ server <- function(input, output, session) {
   df_terfilter <- reactive({
     d <- df %>% mutate(nama_prodi = unname(course_labels[as.character(course)]))
     if (input$filter_prodi != "Semua program studi") d <- d %>% filter(nama_prodi == input$filter_prodi)
-    if (input$filter_waktu == "Malam") d <- d %>% filter(timeof_attendance == "0")
-    if (input$filter_waktu == "Siang") d <- d %>% filter(timeof_attendance == "1")
     d
   })
 
@@ -496,7 +543,7 @@ server <- function(input, output, session) {
     rata2 <- mean(d$target == "Dropout")
     ringkas <- d %>% group_by(.data[[var]]) %>%
       summarise(n = n(), dropout = mean(target == "Dropout"), .groups = "drop")
-    if (!is.null(label_map)) ringkas[[var]] <- label_map[as.character(ringkas[[var]])]
+    if (!is.null(label_map)) ringkas[[var]] <- unname(label_map[as.character(ringkas[[var]])])
     baris <- lapply(seq_len(nrow(ringkas)), function(i) {
       r <- ringkas[i, ]
       tags$tr(tags$td(as.character(r[[var]])), tags$td(style="text-align:right;", format(r$n, big.mark=".", decimal.mark=",")),
@@ -516,18 +563,19 @@ server <- function(input, output, session) {
     d <- df_terfilter()
     tagList(
       fluidRow(
-        column(4, buat_breakdown(d, "scholarship", c("0" = "Bukan penerima", "1" = "Penerima"), "Status beasiswa")),
-        column(4, buat_breakdown(d, "timeof_attendance", c("0" = "Malam", "1" = "Siang"), "Waktu kuliah")),
-        column(4, buat_breakdown(d, "gender", c("0" = "Laki-laki", "1" = "Perempuan"), "Jenis kelamin"))
+        column(4, buat_breakdown(d, "scholarship", ya_tidak_labels, "Status Beasiswa")),
+        column(4, buat_breakdown(d, "tuition_ok", ya_tidak_labels, "UKT Lunas Tepat Waktu")),
+        column(4, buat_breakdown(d, "debtor", ya_tidak_labels, "Status Utang/Tunggakan"))
       ),
       fluidRow(
-        column(6, {
+        column(4, buat_breakdown(d, "gender", gender_labels, "Jenis Kelamin")),
+        column(4, {
           d2 <- d %>% mutate(bin = cut(age_enroll, c(0, 20, 25, 150), labels = c("≤20 tahun", "21-25 tahun", ">25 tahun")))
-          buat_breakdown(d2, "bin", NULL, "Usia saat mendaftar")
+          buat_breakdown(d2, "bin", NULL, "Usia saat Mendaftar")
         }),
-        column(6, {
-          d2 <- d %>% mutate(bin = cut(second_approve, c(-1, 0, 3, 6, 100), labels = c("0 unit", "1-3 unit", "4-6 unit", "7+ unit")))
-          buat_breakdown(d2, "bin", NULL, "Unit lulus semester 2")
+        column(4, {
+          d2 <- d %>% mutate(bin = cut(second_approve, c(-1, 0, 3, 6, 100), labels = c("0", "1-3", "4-6", "7+")))
+          buat_breakdown(d2, "bin", NULL, "Mata Kuliah Lulus Semester 2")
         })
       )
     )
@@ -537,10 +585,6 @@ server <- function(input, output, session) {
   output$tabel_performa <- renderUI({
     suite <- model_pools[[input$pool_performa]]$models
     urutan <- c("glm", "svm_linear", "svm_poly", "svm_radial", "xgboost")
-    # XGBoost dipilih sebagai mesin Prediksi Risiko karena paling seimbang
-    # (terutama sensitivity di pool Dini) -- bukan cuma akurasi tertinggi,
-    # jadi label di sini harus konsisten dengan pilihan itu, bukan dihitung
-    # ulang dari which.max(accuracy) yang bisa menunjuk model lain.
     dipakai <- "xgboost"
     baris <- lapply(urutan, function(n) {
       m <- suite[[n]]
@@ -567,8 +611,8 @@ server <- function(input, output, session) {
   output$confusion_display <- renderUI({
     cm <- cm_aktif()
     n_total <- sum(cm)
-    tp <- cm["Dropout", "Dropout"]; fn <- cm["Lulus", "Dropout"]
-    fp <- cm["Dropout", "Lulus"];   tn <- cm["Lulus", "Lulus"]
+    tp <- cm["Dropout", "Dropout"]; fn <- cm["Bertahan", "Dropout"]
+    fp <- cm["Dropout", "Bertahan"]; tn <- cm["Bertahan", "Bertahan"]
     tagList(
       p(class = "disclaimer", sprintf("%s mahasiswa pada data uji", format(n_total, big.mark=".", decimal.mark=","))),
       div(class = "confusion-grid",
@@ -585,7 +629,7 @@ server <- function(input, output, session) {
 
   output$narasi_confusion <- renderUI({
     cm <- cm_aktif()
-    tp <- cm["Dropout", "Dropout"]; fn <- cm["Lulus", "Dropout"]
+    tp <- cm["Dropout", "Dropout"]; fn <- cm["Bertahan", "Dropout"]
     aktual_dropout <- tp + fn
     tagList(
       p(class = "narasi", sprintf(

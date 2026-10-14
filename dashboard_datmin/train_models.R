@@ -3,7 +3,11 @@
 # model_results_dini.rds dan model_results_lanjutan.rds, lalu app.R tinggal
 # load file itu -- supaya app tidak training ulang setiap dibuka.
 #
-# Jalankan ulang script ini kapan pun data.csv berubah atau parameter model
+# Dataset: Realinho, V., Machado, J., Baptista, L., & Martins, M.V. (2021).
+# Predict students' dropout and academic success (Version 1.0) [Dataset].
+# Zenodo. https://doi.org/10.5281/zenodo.5777340
+#
+# Jalankan ulang script ini kapan pun data berubah atau parameter model
 # diubah, lalu commit ulang kedua file .rds itu.
 
 library(dplyr)
@@ -15,18 +19,14 @@ library(xgboost)
 library(pROC)
 library(randomForest)  # dipakai oleh rfFuncs di dalam rfeControl
 
+source("data_prep.R")
+
 set.seed(123)
 
 # ---- 1. Load data ----
-df <- read.csv("data.csv", sep = ";", header = TRUE)
-
-categorical_vars <- c("course", "timeof_attendance", "prev_quali", "gender", "scholarship")
-df <- df %>% mutate(across(all_of(categorical_vars), as.factor))
-
-# Label risiko dibuat eksplisit: "Dropout" konsisten jadi positive class di
-# confusionMatrix, glm (level kedua = "success"), dan label 1 di xgboost.
-# Ini benerin bug lama: tiap model punya arah "positive" yang beda-beda.
-df$target <- factor(ifelse(df$target == 0, "Dropout", "Lulus"), levels = c("Lulus", "Dropout"))
+df <- muat_data_mentah()
+df <- df %>% mutate(across(all_of(kolom_kategorikal), as.factor))
+df <- siapkan_target(df)
 
 # ---- 2. Split SEBELUM feature selection (fix data leakage) ----
 split    <- initial_split(df, prop = 0.8, strata = "target")
@@ -34,10 +34,14 @@ df_train <- training(split)
 df_test  <- testing(split)
 
 # ---- 3. Dua pool fitur ----
-# Dini: hanya variabel yang diketahui saat mahasiswa MENDAFTAR.
-# Lanjutan: semua variabel, termasuk performa semester 1 & 2.
-pool_dini     <- c("course", "timeof_attendance", "prev_quali", "prev_quali_grade",
-                   "admiss_grade", "gender", "scholarship", "age_enroll")
+# Dini: semua variabel yang diketahui saat mahasiswa MENDAFTAR -- termasuk
+# latar belakang sosial-ekonomi (pendidikan & pekerjaan orang tua, status
+# UKT/beasiswa, indikator makroekonomi tahun masuk).
+# Lanjutan: pool_dini + performa akademik semester 1 & 2.
+kolom_performa <- c("first_credited", "first_enroll", "first_eval", "first_approve",
+                     "first_grade", "first_no_eval", "second_credited", "second_enroll",
+                     "second_eval", "second_approve", "second_grade", "second_no_eval")
+pool_dini     <- setdiff(colnames(df), c("target", kolom_performa))
 pool_lanjutan <- setdiff(colnames(df), "target")
 
 # ---- 4. RFE per pool, HANYA di df_train ----
@@ -52,18 +56,18 @@ pilih_fitur <- function(pool) {
   list(rfe = rfe_result, fitur = predictors(rfe_result))
 }
 
-cat("Menjalankan RFE untuk pool Dini...\n")
+cat("Menjalankan RFE untuk pool Dini (", length(pool_dini), "variabel )...\n")
 rfe_dini <- pilih_fitur(pool_dini)
 cat("Fitur terpilih (Dini):", paste(rfe_dini$fitur, collapse = ", "), "\n\n")
 
-cat("Menjalankan RFE untuk pool Lanjutan...\n")
+cat("Menjalankan RFE untuk pool Lanjutan (", length(pool_lanjutan), "variabel )...\n")
 rfe_lanjutan <- pilih_fitur(pool_lanjutan)
 cat("Fitur terpilih (Lanjutan):", paste(rfe_lanjutan$fitur, collapse = ", "), "\n\n")
 
 # ---- 5. Helper metrics: Accuracy, Sensitivity, Specificity, AUC ----
 hitung_metrics <- function(pred_class, pred_prob, actual) {
   cm      <- confusionMatrix(pred_class, actual, positive = "Dropout")
-  roc_obj <- roc(actual, pred_prob, levels = c("Lulus", "Dropout"), direction = "<", quiet = TRUE)
+  roc_obj <- roc(actual, pred_prob, levels = c("Bertahan", "Dropout"), direction = "<", quiet = TRUE)
   list(
     accuracy    = unname(cm$overall["Accuracy"]),
     sensitivity = unname(cm$byClass["Sensitivity"]),
@@ -103,8 +107,8 @@ latih_model_suite <- function(fitur) {
   dtrain <- xgb.DMatrix(data = train_matrix, label = train_label)
   dtest  <- xgb.DMatrix(data = test_matrix, label = test_label)
 
-  # rasio mayoritas:minoritas -- Dropout cuma ~28% data, jadi di-upweight
-  # supaya model nggak males mendeteksinya.
+  # rasio mayoritas:minoritas -- dipakai juga di SVM & GLM di bawah supaya
+  # bukan cuma XGBoost yang "diistimewakan" nangani imbalance.
   scale_pos_weight <- sum(train_label == 0) / sum(train_label == 1)
 
   params <- list(
@@ -122,8 +126,8 @@ latih_model_suite <- function(fitur) {
 
   train_prob_xgb  <- predict(xgb_model, dtrain)
   test_prob_xgb   <- predict(xgb_model, dtest)
-  train_class_xgb <- factor(ifelse(train_prob_xgb > 0.5, "Dropout", "Lulus"), levels = c("Lulus", "Dropout"))
-  test_class_xgb  <- factor(ifelse(test_prob_xgb  > 0.5, "Dropout", "Lulus"), levels = c("Lulus", "Dropout"))
+  train_class_xgb <- factor(ifelse(train_prob_xgb > 0.5, "Dropout", "Bertahan"), levels = c("Bertahan", "Dropout"))
+  test_class_xgb  <- factor(ifelse(test_prob_xgb  > 0.5, "Dropout", "Bertahan"), levels = c("Bertahan", "Dropout"))
 
   hasil$xgboost <- list(
     model = xgb_model,
@@ -131,9 +135,7 @@ latih_model_suite <- function(fitur) {
     test  = hitung_metrics(test_class_xgb,  test_prob_xgb,  test_preproc$target)
   )
 
-  # bobot kelas yang sama kayak scale_pos_weight XGBoost, dipakai di semua SVM & GLM
-  # di bawah -- biar nggak cuma XGBoost yang "diistimewakan" nangani imbalance.
-  class_weights <- c(Lulus = 1, Dropout = scale_pos_weight)
+  class_weights <- c(Bertahan = 1, Dropout = scale_pos_weight)
 
   ## --- SVM linear ---
   tuned_linear <- tune.svm(
@@ -201,8 +203,8 @@ latih_model_suite <- function(fitur) {
   glm_model <- glm(target ~ ., data = train_preproc, family = binomial, weights = obs_weights)
   train_prob_glm  <- predict(glm_model, newdata = train_preproc, type = "response")
   test_prob_glm   <- predict(glm_model, newdata = test_preproc, type = "response")
-  train_class_glm <- factor(ifelse(train_prob_glm > 0.5, "Dropout", "Lulus"), levels = c("Lulus", "Dropout"))
-  test_class_glm  <- factor(ifelse(test_prob_glm  > 0.5, "Dropout", "Lulus"), levels = c("Lulus", "Dropout"))
+  train_class_glm <- factor(ifelse(train_prob_glm > 0.5, "Dropout", "Bertahan"), levels = c("Bertahan", "Dropout"))
+  test_class_glm  <- factor(ifelse(test_prob_glm  > 0.5, "Dropout", "Bertahan"), levels = c("Bertahan", "Dropout"))
 
   hasil$glm <- list(
     model = glm_model,
