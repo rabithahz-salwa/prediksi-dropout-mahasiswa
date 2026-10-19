@@ -1,84 +1,87 @@
-# RETENSI — Prediksi Risiko Drop-Out Mahasiswa
+# RETENSI — Student Dropout Risk Prediction
 
-**[🔗 Coba dashboard-nya](https://salwaefendii.shinyapps.io/prediksi-dropout-mahasiswa/)**
+**[🔗 Try the live dashboard](https://salwaefendii.shinyapps.io/prediksi-dropout-mahasiswa/)**
 
-Dashboard yang memperkirakan risiko seorang mahasiswa berhenti kuliah di tengah jalan (drop-out), supaya pendampingan bisa dipertimbangkan lebih awal — bukan setelah mahasiswa sudah benar-benar keluar.
+A dashboard that estimates the risk of a student dropping out mid-program, so support can be considered early — not after the student has already left.
+
+> **Note:** the dashboard interface itself is in Indonesian (built for Indonesian higher-education staff — academic advisors, counselors, scholarship offices). This README is in English; the table in the [Live Demo](#live-demo) section below explains what each Indonesian-labeled page does.
 
 ---
 
 ## Problem
 
-Hampir **1 dari 3 mahasiswa** dalam dataset yang dipakai di sini tidak bertahan sampai selesai studinya. Drop-out itu mahal — buat mahasiswa yang kehilangan waktu dan biaya, dan buat institusi yang kehilangan mahasiswa yang sebenarnya bisa dibantu kalau tandanya terdeteksi lebih awal.
+Nearly **1 in 3 students** in the dataset used here did not stay enrolled through completion. Dropout is costly — for students who lose time and money, and for institutions that lose students who could have been helped if the warning signs had been caught earlier.
 
-Masalahnya, tanda-tanda itu sering baru kelihatan setelah terlambat: IP jeblok, kehadiran menurun, atau mahasiswa sudah berhenti bayar UKT berbulan-bulan. Pertanyaannya: **bisa nggak tanda-tanda itu diprediksi lebih awal**, dari data yang institusi sudah punya sejak hari pertama mahasiswa daftar?
+The problem is that those signs often show up too late: a collapsing GPA, falling attendance, or months of unpaid tuition. The question this project asks: **can those signs be predicted earlier**, from data the institution already has from the day a student enrolls?
 
 ## Approach
 
-Dashboard ini dibangun di atas dataset **"Predict Students' Dropout and Academic Success"** (Realinho et al., 2021) — 4.424 mahasiswa, 37 variabel: data pendaftaran, latar belakang sosial-ekonomi (pendidikan & pekerjaan orang tua), dan performa akademik semester 1–2.
+The dashboard is built on the **"Predict Students' Dropout and Academic Success"** dataset (Realinho et al., 2021) — 4,424 students, 37 variables covering enrollment data, socioeconomic background (parents' education and occupation), and first- and second-semester academic performance.
 
-Dua model dilatih untuk dua titik waktu berbeda, karena data yang tersedia beda tergantung kapan pertanyaannya diajukan:
+Two models are trained for two different points in a student's journey, because the data available differs depending on when the question is asked:
 
-- **Deteksi Dini** — dipakai saat mahasiswa baru mendaftar, sebelum ada data akademik sama sekali.
-- **Deteksi Lanjutan** — dipakai setelah mahasiswa melewati semester 1–2, saat performa akademik awal sudah bisa dilihat.
+- **Early Detection** (*Deteksi Dini*) — used at enrollment, before any academic record exists yet.
+- **Follow-up Detection** (*Deteksi Lanjutan*) — used once a student has completed semesters 1–2, when early academic performance is available.
 
-Lima algoritma dibandingkan untuk tiap model (Regresi Logistik, SVM dengan 3 kernel, dan XGBoost), divalidasi dengan 5-fold cross-validation, dengan penanganan *class imbalance* (bobot kelas, bukan cuma andalkan akurasi) dan seleksi fitur (RFE) yang dijalankan **setelah** data dibagi train/test — supaya hasil evaluasinya nggak bias karena "mengintip" data uji. **XGBoost** dipilih sebagai mesin prediksi utama, bukan karena akurasinya paling tinggi, tapi karena paling seimbang dalam menangkap mahasiswa yang benar-benar berisiko (*recall*/sensitivity-nya paling konsisten di kedua model).
+Five algorithms were compared for each model (Logistic Regression, SVM with 3 kernels, and XGBoost), validated with 5-fold cross-validation, with class-imbalance handling (class weighting, not accuracy alone) and feature selection (RFE) run **after** the train/test split — so the evaluation isn't biased by "peeking" at the test set. **XGBoost** was chosen as the production prediction engine, not because it had the single highest accuracy, but because it was the most balanced at catching genuinely at-risk students (its recall/sensitivity was the most consistent across both models).
 
-Dibangun dengan **R Shiny** dan **bslib** (Bootstrap 5).
+Built with **R Shiny** and **bslib** (Bootstrap 5).
 
 ## Key Insight
 
-**Status finansial/administratif ternyata prediktor lebih kuat daripada latar belakang keluarga** — setidaknya di titik pendaftaran. Model Deteksi Dini, kalau disuruh memilih sendiri variabel mana yang paling penting (lewat *Recursive Feature Elimination*), memilih status pembayaran UKT, status utang, beasiswa, program studi, dan jalur pendaftaran — **bukan** pendidikan atau pekerjaan orang tua, walau variabel itu tersedia.
+**Financial/administrative status turned out to be a stronger predictor than family background** — at least at the enrollment stage. When the Early Detection model was left to choose its own most important variables (via *Recursive Feature Elimination*), it picked tuition payment status, debt status, scholarship status, program of study, and admission track — **not** parents' education or occupation, even though those variables were available.
 
-Angkanya cukup tegas: mahasiswa yang **telat bayar UKT** punya tingkat drop-out **86,6%**, dibanding **24,7%** untuk yang bayar tepat waktu. Itu beda lebih dari 3 kali lipat — dan ini data yang institusi sudah punya sejak semester pertama, jauh sebelum nilai akademik jadi indikator.
+The numbers are fairly stark: students who are **late on tuition payments** have an **86.6%** dropout rate, compared to **24.7%** for those who pay on time — more than a 3x difference, and this is data the institution already has from the first semester, long before academic grades become a usable signal.
 
-Begitu data semester 1–2 tersedia, satu variabel tunggal — **jumlah mata kuliah yang lulus di semester 2** — menyumbang sekitar **40% dari seluruh kemampuan prediksi model**. Masuk akal: performa akademik awal adalah sinyal paling langsung soal apakah mahasiswa sedang kesulitan.
+Once semester 1–2 data becomes available, a single variable — **the number of courses passed in semester 2** — accounts for roughly **40% of the model's entire predictive power**. That tracks: early academic performance is the most direct signal of whether a student is struggling.
 
 ## Live Demo
 
 🔗 **https://salwaefendii.shinyapps.io/prediksi-dropout-mahasiswa/**
 
-Dashboard punya 5 bagian:
-| Halaman | Isinya |
+The dashboard has 5 sections (page names are in Indonesian, as shown in the live app):
+
+| Page (as labeled in-app) | What it does |
 |---|---|
-| **Overview** | Ringkasan data: total mahasiswa, tingkat drop-out historis, akurasi model, dan perbandingan antar program studi |
-| **Prediksi Risiko** | Masukkan data satu mahasiswa (hipotetis), dapatkan perkiraan risiko drop-out + kategori + saran tindak lanjut |
-| **Eksplorasi Data** | Bandingkan tingkat drop-out berdasarkan karakteristik mahasiswa (beasiswa, status UKT, usia, dll.) |
-| **Performa Model** | Perbandingan 5 algoritma, matriks kesalahan, dan penjelasan cara membacanya |
-| **Visi Pengembangan** | Konsep pengembangan lanjutan (belum diimplementasikan) — dari prediksi ke sistem pendampingan |
+| **Overview** | Data summary: total students, historical dropout rate, model accuracy, and a breakdown by program of study |
+| **Prediksi Risiko** *(Risk Prediction)* | Enter one (hypothetical) student's data, get a dropout risk estimate + category + suggested follow-up |
+| **Eksplorasi Data** *(Data Exploration)* | Compare dropout rates across student characteristics (scholarship, tuition status, age, etc.) |
+| **Performa Model** *(Model Performance)* | Comparison of all 5 algorithms, confusion matrix, with a plain-language explanation of how to read it |
+| **Visi Pengembangan** *(Development Vision)* | A concept for future development (not implemented) — from prediction to an actual support/outreach system |
 
 ## Screenshots
 
-**Overview — ringkasan data dan performa model**
+**Overview — data summary and model performance**
 ![Overview](screenshots/01_overview.jpg)
 
-**Prediksi Risiko — hasil untuk satu mahasiswa**
+**Risk Prediction — result for one student**
 ![Prediksi Risiko](screenshots/02_prediksi_risiko.jpg)
 
-**Performa Model — perbandingan 5 algoritma**
+**Model Performance — comparison of 5 algorithms**
 ![Performa Model](screenshots/03_performa_model.jpg)
 
 ---
 
-## Untuk Developer
+## For Developers
 
-Struktur project ada di `dashboard_datmin/`:
+Project structure, under `dashboard_datmin/`:
 
 ```
 dashboard_datmin/
-├── app.R                      # Dashboard Shiny (bslib)
-├── train_models.R             # Pipeline training (dijalankan manual)
-├── data_prep.R                # Loading data + label kategori, dipakai bareng app.R & train_models.R
-├── data_uci_full.csv          # Dataset (lihat sitasi di bawah)
-├── model_results_dini.rds     # Model terlatih — pool Deteksi Dini
-└── model_results_lanjutan.rds # Model terlatih — pool Deteksi Lanjutan
+├── app.R                      # Shiny dashboard (bslib)
+├── train_models.R             # Training pipeline (run manually)
+├── data_prep.R                # Data loading + category labels, shared by app.R & train_models.R
+├── data_uci_full.csv          # Dataset (see citation below)
+├── model_results_dini.rds     # Trained models — Early Detection pool
+└── model_results_lanjutan.rds # Trained models — Follow-up Detection pool
 ```
 
-Jalankan lokal: buka `dashboard_datmin/app.R` di RStudio, klik **Run App**. Untuk melatih ulang model (misalnya setelah data berubah), jalankan `train_models.R` secara manual lebih dulu.
+To run locally: open `dashboard_datmin/app.R` in RStudio and click **Run App**. To retrain the models (e.g. after the data changes), run `train_models.R` manually first.
 
-### Keterbatasan yang disengaja
-- Model memprediksi **Dropout vs Bertahan** (Enrolled + Graduate digabung), bukan 3 kelas asli dataset — karena tujuan dashboard ini deteksi risiko keluar, bukan prediksi kelulusan.
-- Dashboard tidak menyimpan data mahasiswa sungguhan, nama, atau status kontak — lihat halaman **Visi Pengembangan** untuk arah pengembangan ke sistem pendampingan nyata.
+### Deliberate scope limitations
+- The model predicts **Dropout vs. Retained** (*Bertahan* — Enrolled + Graduate combined), not the dataset's original 3-class target — because the goal here is dropout-risk detection, not graduation prediction.
+- The dashboard does not store real student records, names, or contact status — see the **Visi Pengembangan** (Development Vision) page for the direction a real support-tracking system would need to take.
 
-## Sitasi Dataset
+## Dataset Citation
 
 > Realinho, V., Machado, J., Baptista, L., & Martins, M.V. (2021). *Predict students' dropout and academic success* (Version 1.0) [Dataset]. Zenodo. https://doi.org/10.5281/zenodo.5777340
